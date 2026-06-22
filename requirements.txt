@@ -1,0 +1,8 @@
+# Python dependencies for gps-agent-bridge
+# All tools use only Python standard library except:
+#
+# invisible_playwright (optional, for Google Maps scraping)
+#   Install: pipx install git+https://github.com/feder-cr/invisible_playwright.git
+#   Then: <python> -m invisible_playwright fetch
+#
+# No other pip packages required — all scripts use stdlib only.

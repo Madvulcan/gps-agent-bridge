@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""
+gpsnear-parallel - Run multiple search sources in parallel and merge results.
+
+Usage:
+    gpsnear-parallel "Italian restaurants" --lat 35.9778 --lon -83.9219 --min-rating 4.5
+    gpsnear-parallel "bookstores" --lat 35.9778 --lon -83.9219
+    gpsnear-parallel "international grocery" --lat 35.9778 --lon -83.9219 --queries "international grocery,Asian grocery,Mexican grocery"
+
+Sources run in parallel:
+  1. web_search (fast, has ratings from Yelp/Google snippets)
+  2. gmaps scraper (slow ~90s, has ratings + precise coords)
+  3. OSM/Nominatim (fast, no ratings, good for exact addresses)
+
+Results are merged, deduplicated, sorted by distance, and output as JSON.
+"""
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import re
+from math import radians, sin, cos, sqrt, atan2
+from datetime import datetime
+
+# Add scripts dir to path so we can import config
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_config
+
+config = get_config()
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org"
+USER_AGENT = "gps-agent-bridge"
+GMAPS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gmaps")
+INVISIBLE_PYTHON = config.get("INVISIBLE_PYTHON_PATH", "")
+DEFAULT_CITY = config.get("DEFAULT_CITY", "")
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def geocode(query):
+    """Geocode an address via Nominatim."""
+    import urllib.request, urllib.parse
+    try:
+        params = {"q": query, "format": "json", "limit": 1}
+        url = f"{NOMINATIM_URL}/search?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        if data:
+            return float(data[0]["lat"]), float(data[0]["lon"]), data[0].get("display_name", "")
+    except Exception:
+        pass
+    return None
+
+
+def extract_rating_from_text(text):
+    """Extract a star rating (e.g. '4.5', '4.5/5', '4.5 stars') from text."""
+    if not text:
+        return None
+    # Match patterns like "4.5", "4.5/5", "4.5 stars", "4.5★"
+    match = re.search(r'(\d+\.?\d*)\s*(?:/5|stars?|★|☆)', text)
+    if not match:
+        match = re.search(r'(\d+\.?\d*)\s*★', text)
+    if match:
+        val = float(match.group(1))
+        if 1.0 <= val <= 5.0:
+            return val
+    return None
+
+
+def extract_name_from_url(url):
+    """Try to extract a business name from a Yelp/Google URL."""
+    if not url:
+        return None
+    # Yelp: yelp.com/biz/business-name
+    match = re.search(r'yelp\.com/biz/([^/?#]+)', url)
+    if match:
+        return match.group(1).replace("-", " ").title()
+    return None
+
+
+async def run_web_search(query, city=None):
+    """Run a web search and extract business names + ratings from results."""
+    if city is None:
+        city = DEFAULT_CITY if DEFAULT_CITY and DEFAULT_CITY != "Unknown" else ""
+    results = []
+    search_query = f"{query} {city} Yelp Google ratings".strip()
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", "-c", f"""
+import json, sys
+try:
+    from hermes_tools import web_search
+    r = web_search(query={json.dumps(search_query)}, limit=10)
+    print(json.dumps(r))
+except ImportError:
+    print(json.dumps({{"error": "not available"}}))
+""",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=20)
+
+        if proc.returncode == 0 and stdout.strip():
+            data = json.loads(stdout.strip())
+            web_results = data.get("data", {}).get("web", [])
+
+            for wr in web_results:
+                title = wr.get("title", "")
+                desc = wr.get("description", "")
+                url = wr.get("url", "")
+
+                # Skip non-business results (Wikipedia, directories, etc.)
+                skip_patterns = ["wikipedia", "yellowpages.com", "tripadvisor", "yelp.com/search",
+                                 "facebook.com", "instagram", "twitter"]
+                if any(p in url.lower() for p in skip_patterns):
+                    continue
+
+                # Extract business name
+                name = title.split(" - ")[0].split(" | ")[0].strip()
+                if not name or len(name) > 60:
+                    name = extract_name_from_url(url)
+
+                if not name:
+                    continue
+
+                # Extract rating
+                rating = extract_rating_from_text(desc) or extract_rating_from_text(title)
+
+                results.append({
+                    "name": name,
+                    "rating": rating,
+                    "description": desc[:150] if desc else "",
+                    "url": url,
+                    "source": "web"
+                })
+    except Exception as e:
+        print(f"[parallel] web_search error: {e}", file=sys.stderr)
+
+    return results
+
+
+async def run_gmaps_search(query, lat, lon, radius_m=5000, scroll=5):
+    """Run gmaps scraper as a subprocess."""
+    if not os.path.exists(GMAPS_SCRIPT):
+        return []
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "xvfb-run", "--auto-servernum", INVISIBLE_PYTHON, GMAPS_SCRIPT,
+            query, "--lat", str(lat), "--lon", str(lon),
+            "--radius", str(radius_m), "--scroll", str(scroll),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+
+        if proc.returncode == 0 and stdout.strip():
+            data = json.loads(stdout.strip())
+            results = []
+            for r in data.get("results", []):
+                r["source"] = "gmaps"
+                results.append(r)
+            return results
+    except asyncio.TimeoutError:
+        print(f"[parallel] gmaps timeout for '{query}'", file=sys.stderr)
+    except Exception as e:
+        print(f"[parallel] gmaps error: {e}", file=sys.stderr)
+
+    return []
+
+
+async def run_osm_search(query, lat, lon, radius_m=5000):
+    """Run OSM/Nominatim search."""
+    import urllib.request, urllib.parse
+
+    lat_offset = radius_m / 111320
+    lon_offset = radius_m / (111320 * cos(radians(lat)))
+    bbox = f"{lon - lon_offset},{lat - lat_offset},{lon + lon_offset},{lat + lat_offset}"
+
+    try:
+        params = {
+            "q": query, "format": "json", "limit": 10,
+            "bounded": 1, "viewbox": bbox, "addressdetails": 1
+        }
+        url = f"{NOMINATIM_URL}/search?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+
+        results = []
+        for r in data:
+            name = r.get("display_name", "").split(",")[0]
+            results.append({
+                "name": name,
+                "lat": float(r["lat"]),
+                "lon": float(r["lon"]),
+                "type": r.get("type", ""),
+                "category": r.get("class", ""),
+                "source": "osm"
+            })
+        return results
+    except Exception as e:
+        print(f"[parallel] osm error: {e}", file=sys.stderr)
+        return []
+
+
+def merge_and_deduplicate(all_results, lat, lon):
+    """Merge results from all sources, deduplicate by name, add distances."""
+    seen = {}
+    merged = []
+
+    for r in all_results:
+        name = r.get("name", "").strip()
+        if not name:
+            continue
+
+        # Normalize name for dedup
+        key = name.lower().replace("'", "").replace("&", "and").strip()
+
+        if key in seen:
+            # Merge: keep the one with more data
+            existing = seen[key]
+            if r.get("rating") and not existing.get("rating"):
+                existing["rating"] = r["rating"]
+            if r.get("lat") and not existing.get("lat"):
+                existing["lat"] = r["lat"]
+                existing["lon"] = r["lon"]
+            if r.get("url") and not existing.get("url"):
+                existing["url"] = r["url"]
+            existing["sources"] = existing.get("sources", [existing.get("source")]) + [r.get("source", "unknown")]
+        else:
+            r["sources"] = [r.get("source", "unknown")]
+            seen[key] = r
+            merged.append(r)
+
+    # Add distances
+    for r in merged:
+        if r.get("lat") and r.get("lon"):
+            r["distance_m"] = round(haversine(lat, lon, r["lat"], r["lon"]), 1)
+            r["distance_mi"] = round(r["distance_m"] / 1609.344, 2)
+        else:
+            # Try to geocode
+            city = DEFAULT_CITY if DEFAULT_CITY and DEFAULT_CITY != "Unknown" else ""
+            geo_query = f"{r['name']} {city}".strip() if city else r['name']
+            geo = geocode(geo_query)
+            if geo:
+                r["lat"], r["lon"], r["address"] = geo
+                r["distance_m"] = round(haversine(lat, lon, r["lat"], r["lon"]), 1)
+                r["distance_mi"] = round(r["distance_m"] / 1609.344, 2)
+
+    # Sort by distance
+    merged.sort(key=lambda x: x.get("distance_m", float("inf")))
+
+    return merged
+
+
+async def parallel_search(query, lat, lon, radius_m=5000, min_rating=None, gmaps_queries=None):
+    """
+    Run all search sources in parallel and merge results.
+
+    Args:
+        query: Primary search query
+        lat, lon: Search center coordinates
+        radius_m: Search radius in meters
+        min_rating: Minimum star rating filter (optional)
+        gmaps_queries: Additional gmaps queries to run (optional)
+    """
+    tasks = []
+
+    # Always run web search and OSM in parallel
+    tasks.append(run_web_search(query))
+    tasks.append(run_osm_search(query, lat, lon, radius_m))
+
+    # Run gmaps for primary query
+    if os.path.exists(GMAPS_SCRIPT):
+        tasks.append(run_gmaps_search(query, lat, lon, radius_m))
+
+        # Run additional gmaps queries if provided
+        if gmaps_queries:
+            for gq in gmaps_queries:
+                if gq.strip() and gq.strip() != query:
+                    tasks.append(run_gmaps_search(gq.strip(), lat, lon, radius_m))
+
+    # Run all tasks in parallel
+    results_lists = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Flatten results
+    all_results = []
+    for rl in results_lists:
+        if isinstance(rl, list):
+            all_results.extend(rl)
+
+    # Merge and deduplicate
+    merged = merge_and_deduplicate(all_results, lat, lon)
+
+    # Filter by rating
+    if min_rating:
+        merged = [r for r in merged if r.get("rating") is None or float(r.get("rating", 0)) >= min_rating]
+
+    # Filter out results with no coordinates
+    merged = [r for r in merged if r.get("lat") is not None]
+
+    return merged
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Parallel location search")
+    parser.add_argument("query", help="Search query")
+    parser.add_argument("--lat", type=float, required=True)
+    parser.add_argument("--lon", type=float, required=True)
+    parser.add_argument("--radius", type=int, default=5000)
+    parser.add_argument("--min-rating", type=float, default=None)
+    parser.add_argument("--queries", type=str, default=None,
+                        help="Comma-separated additional gmaps queries")
+
+    args = parser.parse_args()
+
+    gmaps_queries = args.queries.split(",") if args.queries else None
+
+    start = datetime.now()
+    results = asyncio.run(parallel_search(
+        args.query, args.lat, args.lon,
+        radius_m=args.radius,
+        min_rating=args.min_rating,
+        gmaps_queries=gmaps_queries
+    ))
+    elapsed = (datetime.now() - start).total_seconds()
+
+    # Clean output
+    for r in results:
+        r.pop("coords", None)
+        r.pop("link", None)
+
+    print(json.dumps({
+        "query": args.query,
+        "sources": ["web", "gmaps", "osm"],
+        "elapsed_seconds": round(elapsed, 1),
+        "count": len(results),
+        "results": results
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()

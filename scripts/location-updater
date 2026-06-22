@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""
+location-updater - Continuously update location cache from gpsd.
+
+Runs as a background process, refreshing every 30 seconds.
+Writes:
+  - ~/.hermes/location.json          (hot cache - latest location)
+  - ~/.hermes/location-history.jsonl (warm - 24h rolling log)
+
+Features:
+  - Reverse-geocoding cache (SQLite) to avoid Nominatim rate limits
+  - Weather/AQI enrichment via Open-Meteo (free, no API key)
+"""
+
+import json
+import time
+import subprocess
+import os
+import sys
+import urllib.request
+import sqlite3
+from datetime import datetime, timezone, timedelta
+from math import radians, sin, cos, sqrt, atan2
+
+# Add scripts dir to path for config
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_config
+
+config = get_config()
+
+GPSLOC_CMD = ["gpsloc", "--latlon"]
+CACHE_FILE = config.get("LOCATION_CACHE_PATH", os.path.expanduser("~/.hermes/location.json"))
+HISTORY_FILE = config.get("LOCATION_RAW_PATH", os.path.expanduser("~/.hermes/location-history.jsonl"))
+GEOCACHE_FILE = os.path.expanduser("~/.hermes/geocode-cache.db")
+REFRESH_INTERVAL = 30       # seconds
+MAX_HISTORY_HOURS = 24      # rolling window
+MIN_MOVE_DISTANCE = 50      # meters - don't log if moved less than this
+GEOCODE_CACHE_RADIUS = 50   # meters - reuse cache if within this distance
+WEATHER_REFRESH_INTERVAL = 600  # seconds - refresh weather every 10 minutes
+
+
+def init_geocache():
+    """Initialize the geocoding cache database."""
+    conn = sqlite3.connect(GEOCACHE_FILE)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS geocode_cache (
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            address TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            PRIMARY KEY (lat, lon)
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def get_cached_address(conn, lat, lon):
+    """Check if we have a cached address within GEOCODE_CACHE_RADIUS meters."""
+    # Search for entries within ~0.001 degrees (roughly 100m)
+    cursor = conn.execute(
+        "SELECT lat, lon, address FROM geocode_cache WHERE ABS(lat - ?) < 0.001 AND ABS(lon - ?) < 0.001",
+        (lat, lon)
+    )
+    for cached_lat, cached_lon, address in cursor:
+        dist = haversine(lat, lon, cached_lat, cached_lon)
+        if dist <= GEOCODE_CACHE_RADIUS:
+            return address
+    return None
+
+
+def cache_address(conn, lat, lon, address):
+    """Store a geocoded address in the cache."""
+    # Round coordinates to 3 decimal places (~110m) for caching
+    cache_lat = round(lat, 3)
+    cache_lon = round(lon, 3)
+    conn.execute(
+        "INSERT OR REPLACE INTO geocode_cache (lat, lon, address, timestamp) VALUES (?, ?, ?, ?)",
+        (cache_lat, cache_lon, address, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+
+
+def reverse_geocode(lat, lon, conn):
+    """Get address from coordinates, using cache first to avoid Nominatim rate limits."""
+    # Check cache first
+    cached = get_cached_address(conn, lat, lon)
+    if cached is not None:
+        return cached
+    
+    # Fall back to Nominatim
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
+        req = urllib.request.Request(url, headers={"User-Agent": "gps-agent-bridge"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            address = data.get("display_name", "")
+            if address:
+                cache_address(conn, lat, lon, address)
+            return address
+    except Exception:
+        return ""
+
+
+def fetch_weather_aqi(lat, lon):
+    """Fetch weather and AQI from Open-Meteo (free, no API key)."""
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={lat}&longitude={lon}"
+            f"&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m"
+            f"&timezone=auto"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "gps-agent-bridge"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            current = data.get("current", {})
+            return {
+                "temperature_c": current.get("temperature_2m"),
+                "humidity_pct": current.get("relative_humidity_2m"),
+                "weather_code": current.get("weather_code"),
+                "wind_speed_kmh": current.get("wind_speed_10m"),
+                "source": "open-meteo",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+    except Exception:
+        return None
+
+
+def get_latlon():
+    """Run gpsloc and return (lat, lon) or None."""
+    try:
+        result = subprocess.run(GPSLOC_CMD, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0 and "," in result.stdout:
+            lat, lon = result.stdout.strip().split(",")
+            return float(lat), float(lon)
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        pass
+    return None
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Distance in meters between two lat/lon points."""
+    R = 6371000
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def load_history():
+    """Load existing history, pruning entries older than MAX_HISTORY_HOURS."""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=MAX_HISTORY_HOURS)
+    entries = []
+    with open(HISTORY_FILE, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+                ts = datetime.fromisoformat(entry["timestamp"])
+                if ts > cutoff:
+                    entries.append((ts, entry))
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return entries
+
+
+def save_history(entries):
+    """Write pruned history back to disk."""
+    with open(HISTORY_FILE, "w") as f:
+        for _, entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
+
+def main():
+    import sys
+    
+    print(f"[location-updater] Started. Refreshing every {REFRESH_INTERVAL}s.", flush=True)
+    print(f"[location-updater] Cache: {CACHE_FILE}", flush=True)
+    print(f"[location-updater] History: {HISTORY_FILE}", flush=True)
+
+    # Initialize geocoding cache
+    geocache_conn = init_geocache()
+    
+    last_lat, last_lon = None, None
+    last_weather_fetch = 0
+    current_weather = None
+
+    while True:
+        result = get_latlon()
+        now = datetime.now(timezone.utc)
+
+        if result is None:
+            # GPS unavailable - write stale marker
+            cache = {
+                "status": "unavailable",
+                "timestamp": now.isoformat(),
+                "lat": None,
+                "lon": None,
+                "address": None
+            }
+            with open(CACHE_FILE, "w") as f:
+                json.dump(cache, f, indent=2)
+            time.sleep(REFRESH_INTERVAL)
+            continue
+
+        lat, lon = result
+        
+        # Reverse geocode (with cache to avoid Nominatim rate limits)
+        address = reverse_geocode(lat, lon, geocache_conn)
+
+        # Fetch weather/AQI periodically
+        if time.time() - last_weather_fetch > WEATHER_REFRESH_INTERVAL:
+            weather = fetch_weather_aqi(lat, lon)
+            if weather:
+                current_weather = weather
+            last_weather_fetch = time.time()
+
+        # Hot cache - always update
+        cache = {
+            "status": "active",
+            "timestamp": now.isoformat(),
+            "lat": lat,
+            "lon": lon,
+            "address": address
+        }
+        if current_weather:
+            cache["weather"] = current_weather
+        
+        with open(CACHE_FILE, "w") as f:
+            json.dump(cache, f, indent=2)
+
+        # Warm history - only log if moved significantly or first fix
+        should_log = False
+        if last_lat is None or last_lon is None:
+            should_log = True
+        else:
+            dist = haversine(last_lat, last_lon, lat, lon)
+            if dist >= MIN_MOVE_DISTANCE:
+                should_log = True
+
+        if should_log:
+            entry = {
+                "timestamp": now.isoformat(),
+                "lat": lat,
+                "lon": lon,
+                "address": address
+            }
+            history = load_history()
+            history.append((now, entry))
+            history.sort(key=lambda x: x[0])
+            save_history(history)
+            last_lat, last_lon = lat, lon
+
+        time.sleep(REFRESH_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()

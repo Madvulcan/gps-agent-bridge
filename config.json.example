@@ -1,0 +1,14 @@
+{
+  "GPSD_HOST": "192.168.1.100",
+  "GPSD_UDP_PORT": 2948,
+  "GPSD_TCP_PORT": 2947,
+  "LOCATION_CACHE_PATH": "~/.hermes/location.json",
+  "LOCATION_HISTORY_PATH": "~/.hermes/location-history.db",
+  "LOCATION_RAW_PATH": "~/.hermes/location-history.jsonl",
+  "PLACES_PATH": "~/.hermes/places.json",
+  "DEFAULT_CITY": "",
+  "INVISIBLE_PYTHON_PATH": "",
+  "GPSD_SERVICE_NAME": "gpsd",
+  "UPDATER_SERVICE_NAME": "location-updater",
+  "TZ": "America/New_York"
+}

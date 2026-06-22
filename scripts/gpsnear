@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""
+gpsnear - Find places near your current location.
+
+Usage:
+    gpsnear "Italian restaurants"                     # Search for places near you
+    gpsnear "Italian restaurants" --min-rating 4.5    # Filter by minimum rating
+    gpsnear "library" --radius 3000                   # Custom search radius (meters)
+    gpsnear --address "500 W Church Ave, Knoxville"   # Geocode + distance from you
+    gpsnear --lat 35.96 --lon -83.92 "pizza"          # Override your location
+
+Search strategy:
+    1. Nominatim (OpenStreetMap) — finds POIs by category/type within a bounding box
+    2. Web search fallback — for queries like "Italian restaurants with 4.5+ ratings"
+       that need review data OSM doesn't have
+
+Requires: gpsd running on localhost:2947, location cache at ~/.hermes/location.json
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+# Add scripts dir to path so we can import config
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_config
+
+config = get_config()
+DEFAULT_CITY = config.get("DEFAULT_CITY", "")
+import urllib.request
+import urllib.parse
+from math import radians, sin, cos, sqrt, atan2
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org"
+USER_AGENT = "gps-agent-bridge"
+DEFAULT_RADIUS = 5000  # meters
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def geocode(query):
+    """Geocode an address/place name to lat/lon using Nominatim."""
+    params = urllib.parse.urlencode({"q": query, "format": "json", "limit": 1})
+    req = urllib.request.Request(f"{NOMINATIM_URL}/search?{params}",
+                                 headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        results = json.loads(resp.read().decode())
+    if not results:
+        return None
+    return float(results[0]["lat"]), float(results[0]["lon"]), results[0].get("display_name", "")
+
+
+def reverse_geocode(lat, lon):
+    """Reverse geocode lat/lon to address using Nominatim."""
+    params = urllib.parse.urlencode({"lat": lat, "lon": lon, "format": "json"})
+    req = urllib.request.Request(f"{NOMINATIM_URL}/reverse?{params}",
+                                 headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        result = json.loads(resp.read().decode())
+    return result.get("display_name", "")
+
+
+def search_nearby_osm(lat, lon, query, radius=DEFAULT_RADIUS):
+    """
+    Search for places near a location using Nominatim with a bounding box.
+    Uses the lat/lon directly — no zip code bias.
+    """
+    lat_offset = radius / 111320
+    lon_offset = radius / (111320 * cos(radians(lat)))
+    bbox = f"{lon - lon_offset},{lat - lat_offset},{lon + lon_offset},{lat + lat_offset}"
+
+    params = urllib.parse.urlencode({
+        "q": query,
+        "format": "json",
+        "limit": 20,
+        "bounded": 1,
+        "viewbox": bbox,
+        "addressdetails": 1
+    })
+    req = urllib.request.Request(f"{NOMINATIM_URL}/search?{params}",
+                                 headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        results = json.loads(resp.read().decode())
+    return results
+
+
+def search_nearby_web(lat, lon, query, min_rating=None):
+    """
+    Fallback web search for places with ratings.
+    NOTE: This function is a stub when called standalone.
+    For rating-aware searches, use the agent's web_search tool directly
+    and pass results to gpsnear via --lat/--lon with known addresses.
+    """
+    return []
+
+
+def get_my_location():
+    """Read current location from cache."""
+    cache_file = os.path.expanduser("~/.hermes/location.json")
+    if not os.path.exists(cache_file):
+        return None
+    with open(cache_file) as f:
+        cache = json.load(f)
+    if cache.get("status") != "active" or cache.get("lat") is None:
+        return None
+    return cache["lat"], cache["lon"], cache.get("address", "")
+
+
+def main():
+    args = sys.argv[1:]
+
+    # Parse optional flags
+    radius = DEFAULT_RADIUS
+    lat_override = None
+    lon_override = None
+    min_rating = None
+    use_web = False
+
+    i = 0
+    query_parts = []
+    while i < len(args):
+        if args[i] == "--radius" and i + 1 < len(args):
+            radius = int(args[i + 1])
+            i += 2
+        elif args[i] == "--lat" and i + 1 < len(args):
+            lat_override = float(args[i + 1])
+            i += 2
+        elif args[i] == "--lon" and i + 1 < len(args):
+            lon_override = float(args[i + 1])
+            i += 2
+        elif args[i] == "--min-rating" and i + 1 < len(args):
+            min_rating = float(args[i + 1])
+            i += 2
+        elif args[i] == "--web":
+            use_web = True
+            i += 1
+        elif args[i] == "--address" and i + 1 < len(args):
+            # Geocode mode
+            query = " ".join(args[i + 1:])
+            my = get_my_location()
+            if not my:
+                print(json.dumps({"error": "No location cache available"}))
+                sys.exit(1)
+            my_lat, my_lon, my_addr = my
+            result = geocode(query)
+            if not result:
+                print(json.dumps({"error": f"Could not geocode: {query}"}))
+                sys.exit(1)
+            target_lat, target_lon, target_addr = result
+            dist_m = haversine(my_lat, my_lon, target_lat, target_lon)
+            dist_mi = dist_m / 1609.344
+            print(json.dumps({
+                "query": query,
+                "my_location": {"lat": my_lat, "lon": my_lon, "address": my_addr},
+                "target": {"lat": target_lat, "lon": target_lon, "address": target_addr},
+                "distance_m": round(dist_m, 1),
+                "distance_mi": round(dist_mi, 2)
+            }, indent=2))
+            return
+        else:
+            query_parts.append(args[i])
+            i += 1
+
+    query = " ".join(query_parts)
+    if not query:
+        print(__doc__)
+        sys.exit(1)
+
+    if lat_override and lon_override:
+        my_lat, my_lon = lat_override, lon_override
+        my_addr = reverse_geocode(my_lat, my_lon)
+    else:
+        my = get_my_location()
+        if not my:
+            print(json.dumps({"error": "No location cache available. Is gpsdRelay connected?"}))
+            sys.exit(1)
+        my_lat, my_lon, my_addr = my
+
+    # Strategy 1: OSM/Nominatim search (no zip bias, uses bounding box)
+    osm_results = search_nearby_osm(my_lat, my_lon, query, radius)
+
+    hits = []
+    seen_names = set()
+
+    for r in osm_results:
+        r_lat, r_lon = float(r["lat"]), float(r["lon"])
+        dist_m = haversine(my_lat, my_lon, r_lat, r_lon)
+        name = r.get("display_name", "").split(",")[0]
+        if name in seen_names:
+            continue
+        seen_names.add(name)
+        hits.append({
+            "name": name,
+            "address": r.get("display_name", ""),
+            "lat": r_lat,
+            "lon": r_lon,
+            "distance_m": round(dist_m, 1),
+            "distance_mi": round(dist_m / 1609.344, 2),
+            "type": r.get("type", ""),
+            "category": r.get("class", ""),
+            "source": "osm"
+        })
+
+    # Strategy 2: Web search for ratings (if --min-rating or --web flag)
+    if use_web:
+        web_results = search_nearby_web(my_lat, my_lon, query, min_rating)
+        for wr in web_results:
+            url = wr.get("url", "")
+            title = wr.get("title", "")
+            desc = wr.get("description", "")
+            # Extract rating from description if present
+            rating = None
+            for part in desc.split():
+                try:
+                    val = float(part)
+                    if 1.0 <= val <= 5.0:
+                        rating = val
+                        break
+                except ValueError:
+                    continue
+            if min_rating and rating and rating < min_rating:
+                continue
+            if title and title not in seen_names:
+                seen_names.add(title)
+                # Try to geocode the result to get distance
+                city = DEFAULT_CITY if DEFAULT_CITY and DEFAULT_CITY != "Unknown" else ""
+                geo_query = f"{title} {city}".strip() if city else title
+                geo = geocode(geo_query)
+                if geo:
+                    g_lat, g_lon, g_addr = geo
+                    dist_m = haversine(my_lat, my_lon, g_lat, g_lon)
+                    hits.append({
+                        "name": title,
+                        "address": g_addr or desc[:100],
+                        "lat": g_lat,
+                        "lon": g_lon,
+                        "distance_m": round(dist_m, 1),
+                        "distance_mi": round(dist_m / 1609.344, 2),
+                        "type": "restaurant",
+                        "category": "web",
+                        "rating": rating,
+                        "source": "web"
+                    })
+
+    hits.sort(key=lambda x: x["distance_m"])
+
+    if not hits:
+        print(json.dumps({"error": f"No results for '{query}' within {radius}m"}))
+        sys.exit(1)
+
+    print(json.dumps({
+        "query": query,
+        "my_location": {"lat": my_lat, "lon": my_lon, "address": my_addr},
+        "radius_m": radius,
+        "min_rating": min_rating,
+        "results": hits
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()

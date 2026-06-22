@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+location-compact - Tiered location history compression.
+
+Reads the raw 30s location-history.jsonl and produces compacted tiers:
+  - tier1: last 24h, 5-minute averages     (~70KB/day raw → ~2KB)
+  - tier2: 1-30 days, hourly centroids      (~10KB/day)
+  - tier3: 31d-1yr, 4-hour blocks           (~2KB/day)
+  - tier4: 1yr+, daily summary              (~200B/day)
+
+All tiers stored in a single SQLite DB for efficient querying.
+"""
+
+import json
+import sqlite3
+import os
+from datetime import datetime, timezone, timedelta
+from math import radians, sin, cos, sqrt, atan2
+from collections import defaultdict
+
+RAW_HISTORY = os.path.expanduser("~/.hermes/location-history.jsonl")
+DB_PATH = os.path.expanduser("~/.hermes/location-history.db")
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_tiers (
+            tier        INTEGER NOT NULL,
+            period_start TEXT NOT NULL,
+            period_end   TEXT NOT NULL,
+            lat         REAL NOT NULL,
+            lon         REAL NOT NULL,
+            address     TEXT,
+            radius_m    REAL,
+            point_count INTEGER,
+            PRIMARY KEY (tier, period_start)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_tier_time ON location_tiers(tier, period_start)")
+    conn.commit()
+    return conn
+
+def load_raw_entries():
+    if not os.path.exists(RAW_HISTORY):
+        return []
+    entries = []
+    with open(RAW_HISTORY, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                e = json.loads(line)
+                e["_ts"] = datetime.fromisoformat(e["timestamp"])
+                entries.append(e)
+            except (json.JSONDecodeError, KeyError):
+                continue
+    entries.sort(key=lambda x: x["_ts"])
+    return entries
+
+def centroid(entries):
+    """Compute average lat/lon and max distance from center."""
+    avg_lat = sum(e["lat"] for e in entries) / len(entries)
+    avg_lon = sum(e["lon"] for e in entries) / len(entries)
+    max_dist = max(haversine(avg_lat, avg_lon, e["lat"], e["lon"]) for e in entries) if len(entries) > 1 else 0
+    # Use the most common address
+    addresses = [e.get("address", "") for e in entries if e.get("address")]
+    address = max(set(addresses), key=addresses.count) if addresses else ""
+    return avg_lat, avg_lon, address, max_dist
+
+def compact_tier(entries, bucket_seconds, tier_num, conn):
+    """Group entries into time buckets and write centroids."""
+    if not entries:
+        return 0
+
+    buckets = defaultdict(list)
+    for e in entries:
+        bucket_ts = e["_ts"].replace(
+            minute=(e["_ts"].minute // (bucket_seconds // 60)) * (bucket_seconds // 60) if bucket_seconds < 3600 else e["_ts"].minute,
+            second=0, microsecond=0
+        )
+        if bucket_seconds >= 3600:
+            bucket_ts = bucket_ts.replace(minute=0)
+        if bucket_seconds >= 14400:  # 4 hours
+            bucket_ts = bucket_ts.replace(hour=(e["_ts"].hour // (bucket_seconds // 3600)) * (bucket_seconds // 3600))
+        if bucket_seconds >= 86400:  # daily
+            bucket_ts = bucket_ts.replace(hour=0)
+        buckets[bucket_ts].append(e)
+
+    written = 0
+    for ts in sorted(buckets.keys()):
+        bucket = buckets[ts]
+        lat, lon, addr, radius = centroid(bucket)
+        end_ts = ts + timedelta(seconds=bucket_seconds)
+        conn.execute(
+            "INSERT OR REPLACE INTO location_tiers "
+            "(tier, period_start, period_end, lat, lon, address, radius_m, point_count) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (tier_num, ts.isoformat(), end_ts.isoformat(),
+             round(lat, 6), round(lon, 6), addr, round(radius, 1), len(bucket))
+        )
+        written += 1
+    return written
+
+def main():
+    now = datetime.now(timezone.utc)
+    entries = load_raw_entries()
+
+    if not entries:
+        print("[compact] No raw history to compact.")
+        return
+
+    print(f"[compact] Loaded {len(entries)} raw entries spanning "
+          f"{entries[0]['_ts'].strftime('%Y-%m-%d')} to {entries[-1]['_ts'].strftime('%Y-%m-%d')}")
+
+    conn = init_db()
+
+    # Tier 1: last 24h, 5-minute buckets
+    cutoff_24h = now - timedelta(hours=24)
+    tier1 = [e for e in entries if e["_ts"] > cutoff_24h]
+    n1 = compact_tier(tier1, 300, 1, conn)
+
+    # Tier 2: 1-30 days, hourly buckets
+    cutoff_30d = now - timedelta(days=30)
+    tier2 = [e for e in entries if cutoff_30d < e["_ts"] <= cutoff_24h]
+    n2 = compact_tier(tier2, 3600, 2, conn)
+
+    # Tier 3: 31d-1yr, 4-hour buckets
+    cutoff_1y = now - timedelta(days=365)
+    tier3 = [e for e in entries if cutoff_1y < e["_ts"] <= cutoff_30d]
+    n3 = compact_tier(tier3, 14400, 3, conn)
+
+    # Tier 4: 1yr+, daily buckets
+    tier4 = [e for e in entries if e["_ts"] <= cutoff_1y]
+    n4 = compact_tier(tier4, 86400, 4, conn)
+
+    conn.commit()
+
+    # Stats
+    total_rows = conn.execute("SELECT COUNT(*) FROM location_tiers").fetchone()[0]
+    db_size = os.path.getsize(DB_PATH)
+    conn.close()
+
+    print(f"[compact] Written: tier1={n1} t2={n2} t3={n3} t4={n4} | "
+          f"total_rows={total_rows} db_size={db_size//1024}KB")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""
+location-query - Query the compacted location history.
+
+Usage:
+    location-query --now                              # Current location
+    location-query --today                            # Where did I go today?
+    location-query --date 2026-01-08                   # Where was I on this date?
+    location-query --recent 2h                        # Where was I in the last 2 hours?
+    location-query --range "2026-01-01 to 2026-01-08"  # Date range
+    location-query --export gpx --date 2026-01-08      # Export as GPX
+    location-query --export kml --date 2026-01-08      # Export as KML
+    location-query --export gpx --range "2026-01-01 to 2026-01-08"
+"""
+
+import json
+import sqlite3
+import os
+import sys
+from datetime import datetime, timezone, timedelta
+
+DB_PATH = os.path.expanduser("~/.hermes/location-history.db")
+CACHE_FILE = os.path.expanduser("~/.hermes/location.json")
+
+def query_tier(conn, tier, start, end):
+    rows = conn.execute(
+        "SELECT period_start, period_end, lat, lon, address, radius_m, point_count "
+        "FROM location_tiers WHERE tier = ? AND period_start >= ? AND period_start < ? "
+        "ORDER BY period_start",
+        (tier, start.isoformat(), end.isoformat())
+    ).fetchall()
+    return rows
+
+def find_best_tier(start, end):
+    """Pick the coarsest tier that has data for this range."""
+    duration = (end - start).total_seconds()
+    if duration <= 86400:       # ≤1 day → try tier 1 (5min)
+        return 1
+    elif duration <= 2592000:   # ≤30 days → tier 2 (hourly)
+        return 2
+    elif duration <= 31536000:  # ≤1 year → tier 3 (4hr)
+        return 3
+    else:
+        return 4
+
+def format_entry(row):
+    ts, te, lat, lon, addr, radius, count = row
+    ts_dt = datetime.fromisoformat(ts)
+    return {
+        "time": ts_dt.strftime("%Y-%m-%d %H:%M"),
+        "lat": lat,
+        "lon": lon,
+        "address": addr or "unknown",
+        "radius_m": radius
+    }
+
+def export_gpx(rows, output_path):
+    """Export location history as GPX 1.1."""
+    gpx_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<gpx version="1.1" creator="gps-agent-bridge">',
+        '  <trk>',
+        '    <name>Location History</name>',
+        '    <trkseg>'
+    ]
+    for row in rows:
+        ts, te, lat, lon, addr, radius, count = row
+        gpx_lines.append(f'      <trkpt lat="{lat}" lon="{lon}">')
+        gpx_lines.append(f'        <time>{ts}</time>')
+        if addr:
+            gpx_lines.append(f'        <desc>{addr}</desc>')
+        gpx_lines.append('      </trkpt>')
+    gpx_lines.extend([
+        '    </trkseg>',
+        '  </trk>',
+        '</gpx>'
+    ])
+    with open(output_path, "w") as f:
+        f.write("\n".join(gpx_lines))
+    return output_path
+
+
+def export_kml(rows, output_path):
+    """Export location history as KML 2.2."""
+    kml_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<kml xmlns="http://www.opengis.net/kml/2.2">',
+        '  <Document>',
+        '    <name>Location History</name>',
+        '    <Placemark>',
+        '      <name>Track</name>',
+        '      <LineString>',
+        '        <coordinates>'
+    ]
+    coords = []
+    for row in rows:
+        ts, te, lat, lon, addr, radius, count = row
+        coords.append(f"{lon},{lat},0")
+    kml_lines.append("          " + " ".join(coords))
+    kml_lines.extend([
+        '        </coordinates>',
+        '      </LineString>',
+        '    </Placemark>',
+        '  </Document>',
+        '</kml>'
+    ])
+    with open(output_path, "w") as f:
+        f.write("\n".join(kml_lines))
+    return output_path
+
+
+def main():
+    args = sys.argv[1:]
+    now = datetime.now(timezone.utc)
+    conn = sqlite3.connect(DB_PATH)
+
+    # Handle --export
+    if "--export" in args:
+        export_format = args[args.index("--export") + 1] if args.index("--export") + 1 < len(args) else "gpx"
+        
+        # Determine date range
+        if "--date" in args:
+            date_str = args[args.index("--date") + 1]
+            start = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+            end = start + timedelta(days=1)
+        elif "--range" in args:
+            range_str = args[args.index("--range") + 1]
+            parts = range_str.split(" to ")
+            start = datetime.fromisoformat(parts[0]).replace(tzinfo=timezone.utc)
+            end = datetime.fromisoformat(parts[1]).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        elif "--today" in args:
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end = now
+        else:
+            start = now - timedelta(days=1)
+            end = now
+        
+        tier = find_best_tier(start, end)
+        rows = query_tier(conn, tier, start, end)
+        conn.close()
+        
+        if not rows:
+            print(json.dumps({"error": f"No location data for {start.date()} to {end.date()}"}))
+            return
+        
+        # Generate output filename
+        date_str = start.strftime("%Y-%m-%d")
+        output_path = os.path.expanduser(f"~/hermes/location-export-{date_str}.{export_format}")
+        
+        if export_format == "gpx":
+            export_gpx(rows, output_path)
+        elif export_format == "kml":
+            export_kml(rows, output_path)
+        else:
+            print(json.dumps({"error": f"Unknown export format: {export_format}. Use 'gpx' or 'kml'."}))
+            return
+        
+        print(json.dumps({
+            "status": "ok",
+            "format": export_format,
+            "output": output_path,
+            "points": len(rows),
+            "date_range": f"{start.date()} to {end.date()}"
+        }, indent=2))
+        return
+
+    if "--now" in args:
+        # Read from hot cache
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE) as f:
+                cache = json.load(f)
+            print(json.dumps(cache, indent=2))
+        else:
+            print(json.dumps({"error": "No location cache available"}))
+        return
+
+    if "--today" in args:
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+        tier = 1
+    elif "--recent" in args:
+        idx = args.index("--recent") + 1
+        if idx < len(args):
+            hours = int(args[idx].rstrip("h"))
+        else:
+            hours = 1
+        start = now - timedelta(hours=hours)
+        end = now
+        tier = find_best_tier(start, end)
+    elif "--date" in args:
+        date_str = args[args.index("--date") + 1]
+        start = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        tier = find_best_tier(start, end)
+    elif "--range" in args:
+        range_str = args[args.index("--range") + 1]
+        parts = range_str.split(" to ")
+        start = datetime.fromisoformat(parts[0]).replace(tzinfo=timezone.utc)
+        end = datetime.fromisoformat(parts[1]).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        tier = find_best_tier(start, end)
+    else:
+        print(__doc__)
+        return
+
+    rows = query_tier(conn, tier, start, end)
+    conn.close()
+
+    if not rows:
+        print(json.dumps({"error": f"No location data for {start.date()} to {end.date()}", "tier": tier}))
+        return
+
+    results = [format_entry(r) for r in rows]
+    print(json.dumps({
+        "query": {"start": start.isoformat(), "end": end.isoformat(), "tier": tier},
+        "count": len(results),
+        "locations": results
+    }, indent=2))
+
+if __name__ == "__main__":
+    main()

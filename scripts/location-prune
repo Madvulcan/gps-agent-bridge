@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""
+Prune raw location history to keep only the last 48 hours.
+The compacted tiers in SQLite hold everything older.
+"""
+import json, os
+from datetime import datetime, timezone, timedelta
+
+HISTORY_FILE = os.path.expanduser("~/.hermes/location-history.jsonl")
+KEEP_HOURS = 48
+
+if not os.path.exists(HISTORY_FILE):
+    exit(0)
+
+cutoff = datetime.now(timezone.utc) - timedelta(hours=KEEP_HOURS)
+kept = []
+with open(HISTORY_FILE, "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            ts = datetime.fromisoformat(entry["timestamp"])
+            if ts > cutoff:
+                kept.append(line)
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+with open(HISTORY_FILE, "w") as f:
+    for line in kept:
+        f.write(line + "\n")

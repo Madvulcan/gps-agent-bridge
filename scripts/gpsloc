@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""
+gpsloc - Read current GPS coordinates from a local gpsd daemon.
+
+Usage:
+    gpsloc              # Print lat/lon/alt/speed as JSON
+    gpsloc --human      # Print human-readable location
+    gpsloc --lat        # Print latitude only
+    gpsloc --lon        # Print longitude only
+    gpsloc --latlon     # Print "lat,lon" (for maps URLs, etc.)
+
+Requires: gpsd running on localhost:2947
+"""
+
+import sys
+import json
+import socket
+
+GPSD_HOST = "127.0.0.1"
+GPSD_PORT = 2947
+TIMEOUT = 5
+
+
+def get_gps_data():
+    """Connect to gpsd and get the latest TPV report."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(TIMEOUT)
+    sock.connect((GPSD_HOST, GPSD_PORT))
+
+    # Request JSON watch mode
+    sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
+
+    # Read responses until we get a TPV report
+    buf = b""
+    while True:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+        for line in buf.split(b"\n"):
+            if line.startswith(b'{"class":"TPV"'):
+                sock.close()
+                return json.loads(line.decode("utf-8", errors="replace"))
+        buf = b""
+
+    sock.close()
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+
+    try:
+        data = get_gps_data()
+    except (ConnectionRefusedError, socket.timeout, OSError) as e:
+        print(json.dumps({"error": str(e), "host": GPSD_HOST, "port": GPSD_PORT}))
+        sys.exit(1)
+
+    if data is None:
+        print(json.dumps({"error": "No TPV data received from gpsd"}))
+        sys.exit(1)
+
+    if "--lat" in args:
+        print(data.get("lat", ""))
+    elif "--lon" in args:
+        print(data.get("lon", ""))
+    elif "--latlon" in args:
+        print(f"{data.get('lat','')},{data.get('lon','')}")
+    elif "--human" in args:
+        lat = data.get("lat", "?")
+        lon = data.get("lon", "?")
+        alt = data.get("alt", "?")
+        speed = data.get("speed", "?")
+        mode = data.get("mode", 0)
+        mode_str = {0: "no fix", 1: "no fix", 2: "2D", 3: "3D"}.get(mode, "?")
+        print(f"Latitude:  {lat}")
+        print(f"Longitude: {lon}")
+        print(f"Altitude:  {alt} m")
+        print(f"Speed:     {speed} m/s")
+        print(f"Fix:       {mode_str}")
+    else:
+        # Default: output full JSON
+        print(json.dumps(data, indent=2))
+
+
+if __name__ == "__main__":
+    main()

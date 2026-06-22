@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+gmaps - Google Maps scraper using invisible_playwright.
+
+Usage:
+    gmaps "bookstores" --lat 35.9778 --lon -83.9219
+    gmaps "Italian restaurants" --lat 35.9778 --lon -83.9219
+"""
+
+import asyncio
+import json
+import os
+import sys
+import tempfile
+from math import radians, sin, cos, sqrt, atan2
+
+# Add scripts dir to path so we can import config
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from config import get_config
+
+config = get_config()
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org"
+USER_AGENT = "gps-agent-bridge"
+INVISIBLE_PYTHON = config.get("INVISIBLE_PYTHON_PATH", "")
+DEFAULT_CITY = config.get("DEFAULT_CITY", "")
+
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+
+def build_gmaps_url(query, lat, lon, radius_m=None):
+    zoom = 14
+    if radius_m and radius_m > 5000:
+        zoom = 12
+    elif radius_m and radius_m > 2000:
+        zoom = 13
+    return f"https://www.google.com/maps/search/{query.replace(' ', '+')}/@{lat},{lon},{zoom}z"
+
+
+def write_js_scraper(filepath, url, scroll_rounds):
+    """Write the JS scraper to a temp file."""
+    # Find the invisible_playwright site-packages path
+    ipython = INVISIBLE_PYTHON or "python3"
+    # Derive site-packages from the python path
+    if ipython != "python3":
+        import subprocess
+        try:
+            sp = subprocess.run([ipython, "-c", "import site; print(site.getsitepackages()[0])"],
+                              capture_output=True, text=True, timeout=5)
+            site_packages = sp.stdout.strip() if sp.returncode == 0 else ""
+        except Exception:
+            site_packages = ""
+    else:
+        site_packages = ""
+    
+    with open(filepath, "w") as f:
+        f.write("import asyncio, json, sys, os\n")
+        f.write('os.environ["PWDEBUG"] = "0"\n')
+        if site_packages:
+            f.write(f'sys.path.insert(0, "{site_packages}")\n')
+        f.write("from invisible_playwright.async_api import InvisiblePlaywright\n\n")
+        f.write("async def main():\n")
+        f.write(f'    url = "{url}"\n')
+        f.write(f"    scroll_rounds = {scroll_rounds}\n\n")
+        f.write("    async with InvisiblePlaywright(headless=True) as browser:\n")
+        f.write("        page = await browser.new_page()\n")
+        f.write("        await page.goto(url, timeout=30000)\n")
+        f.write("        await page.wait_for_timeout(6000)\n\n")
+        f.write("        for _ in range(scroll_rounds):\n")
+        f.write("            feed = await page.query_selector('[role=\"feed\"]')\n")
+        f.write("            if feed:\n")
+        f.write("                await feed.evaluate('el => el.scrollBy(0, 1500)')\n")
+        f.write("            else:\n")
+        f.write("                await page.evaluate('window.scrollBy(0, 1500)')\n")
+        f.write("            await page.wait_for_timeout(2500)\n\n")
+        f.write("        data = await page.evaluate('''() => {\n")
+        f.write("            const seen = new Set();\n")
+        f.write("            const results = [];\n")
+        f.write("            const items = document.querySelectorAll('[role=\"feed\"] > div');\n")
+        f.write("            items.forEach(item => {\n")
+        f.write("                const nameEl = item.querySelector('.fontHeadlineSmall, h3, .qBF1Pd');\n")
+        f.write("                const ratingEl = item.querySelector('span[aria-label*=\"star\"], .MW4etd');\n")
+        f.write("                const reviewEl = item.querySelector('[aria-label*=\"review\"], .UY7F9');\n")
+        f.write("                const typeEl = item.querySelector('.Ahnjwc, .W4Efsd span:first-child');\n")
+        f.write("                const linkEl = item.querySelector('a[href*=\"maps/place\"]');\n")
+        f.write("                let name = nameEl ? nameEl.textContent.trim() : '';\n")
+        f.write("                if (!name || seen.has(name)) return;\n")
+        f.write("                seen.add(name);\n")
+        f.write("                let rating = ratingEl ? ratingEl.textContent.trim() : null;\n")
+        f.write("                let reviews = reviewEl ? reviewEl.textContent.trim() : null;\n")
+        f.write("                // Clean up: extract just the number\n")
+        f.write("                if (rating) rating = rating.match(/([\\d.]+)/)?.[1] || rating;\n")
+        f.write("                if (reviews) reviews = reviews.match(/([\\d,]+)/)?.[1] || reviews;\n")
+        f.write("                let type = typeEl ? typeEl.textContent.trim() : '';\n")
+        f.write("                let link = linkEl ? linkEl.href : '';\n")
+        f.write("                let coords = null;\n")
+        f.write("                if (link) {\n")
+        f.write("                    const m = link.match(/(-?\\d+\\.\\d+),(-?\\d+\\.\\d+)/);\n")
+        f.write("                    if (m) coords = {lat: parseFloat(m[1]), lon: parseFloat(m[2])};\n")
+        f.write("                }\n")
+        f.write("                results.push({name, rating, reviews, type, link, coords});\n")
+        f.write("            });\n")
+        f.write("            return results;\n")
+        f.write("        }''')\n\n")
+        f.write("        await page.close()\n")
+        f.write("        print(json.dumps(data))\n\n")
+        f.write("asyncio.run(main())\n")
+
+
+async def scrape_gmaps(lat, lon, query, radius_m=None, scroll_rounds=4):
+    url = build_gmaps_url(query, lat, lon, radius_m)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        js_path = f.name
+
+    try:
+        write_js_scraper(js_path, url, scroll_rounds)
+
+        proc = await asyncio.create_subprocess_exec(
+            "xvfb-run", "--auto-servernum", INVISIBLE_PYTHON, js_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+
+        if proc.returncode != 0:
+            err = stderr.decode().strip()
+            for line in err.split("\n"):
+                if "Error" in line or "Traceback" in line:
+                    print(f"[gmaps] {line}", file=sys.stderr)
+            return []
+
+        raw = stdout.decode().strip()
+        start = raw.find("[")
+        end = raw.rfind("]") + 1
+        if start >= 0 and end > start:
+            return json.loads(raw[start:end])
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[gmaps] JSON parse error: {e}", file=sys.stderr)
+    except asyncio.TimeoutError:
+        print(f"[gmaps] Timeout", file=sys.stderr)
+    finally:
+        os.unlink(js_path)
+
+    return []
+
+
+def enrich_with_nominatim(results, lat, lon):
+    import urllib.request, urllib.parse
+    enriched = []
+    for r in results:
+        r_lat, r_lon = None, None
+        r_addr = r.get("address", "")
+        if r.get("coords") and r["coords"].get("lat"):
+            r_lat = r["coords"]["lat"]
+            r_lon = r["coords"]["lon"]
+        if r_lat is None and r.get("name"):
+            try:
+                city = DEFAULT_CITY if DEFAULT_CITY and DEFAULT_CITY != "Unknown" else ""
+                query = f"{r['name']} {city}".strip() if city else r['name']
+                params = {"q": query, "format": "json", "limit": 1}
+                url = f"{NOMINATIM_URL}/search?{urllib.parse.urlencode(params)}"
+                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode())
+                if data:
+                    r_lat = float(data[0]["lat"])
+                    r_lon = float(data[0]["lon"])
+                    if not r_addr:
+                        r_addr = data[0].get("display_name", "")
+            except Exception:
+                pass
+        if r_lat is not None:
+            r["lat"] = r_lat
+            r["lon"] = r_lon
+            r["address"] = r_addr
+            r["distance_m"] = round(haversine(lat, lon, r_lat, r_lon), 1)
+            r["distance_mi"] = round(r["distance_m"] / 1609.344, 2)
+            enriched.append(r)
+    return enriched
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Google Maps scraper")
+    parser.add_argument("query", help="Search query")
+    parser.add_argument("--lat", type=float, required=True)
+    parser.add_argument("--lon", type=float, required=True)
+    parser.add_argument("--radius", type=int, default=None)
+    parser.add_argument("--scroll", type=int, default=4)
+    args = parser.parse_args()
+
+    raw = asyncio.run(scrape_gmaps(
+        args.lat, args.lon, args.query,
+        radius_m=args.radius, scroll_rounds=args.scroll
+    ))
+    results = enrich_with_nominatim(raw, args.lat, args.lon)
+    results = [r for r in results if r.get("lat") is not None]
+    results.sort(key=lambda x: x.get("distance_m", float("inf")))
+    for r in results:
+        r.pop("coords", None)
+        r.pop("link", None)
+
+    print(json.dumps({
+        "query": args.query,
+        "source": "google_maps",
+        "count": len(results),
+        "results": results
+    }, indent=2))
+
+
+if __name__ == "__main__":
+    main()

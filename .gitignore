@@ -1,0 +1,27 @@
+# gps-agent-bridge .gitignore
+
+# Configuration (contains user-specific IP, paths)
+config.json
+
+# Data files (user's personal location data, history, places)
+*.db
+*.db-journal
+*.jsonl
+places.json
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+.vscode/
+.idea/
