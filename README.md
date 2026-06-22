@@ -55,7 +55,7 @@ Both apps push standard NMEA 0183 sentences to your desktop — the setup is ide
 
 - **Desktop:** Linux (Ubuntu, Debian, Mint, Arch, Fedora, etc.) or macOS (partial support, untested)
 - **Phone:** Android or iOS
-- **Network:** Both devices on the same network (LAN or Tailscale recommended)
+- **Network:** Both devices on the same network (Tailscale, Wireguard, or similar recommended)
 - **Python:** 3.10+ (stdlib only — no pip packages required for core functionality)
 - **Optional:** `invisible_playwright` for Google Maps scraping (requires separate install + Firefox fetch)
 
