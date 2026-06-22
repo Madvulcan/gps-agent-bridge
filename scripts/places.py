@@ -277,7 +277,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Manage remembered places")
-    sub = parser.addsubparsers(dest="command")
+    sub = parser.add_subparsers(dest="command")
     
     add_parser = sub.add_parser("add", help="Remember a place")
     add_parser.add_argument("--name", required=True)
