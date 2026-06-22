@@ -81,15 +81,15 @@ install_system_deps() {
     case "$OS" in
         ubuntu|debian|linuxmint|pop)
             sudo apt-get update -qq
-            sudo apt-get install -y -qq gpsd gpsd-clients python3-pip python3-venv xvfb 2>/dev/null || \
+            sudo apt-get install -y -qq gpsd gpsd-clients python3-pip python3-venv xvfb python3-pipx 2>/dev/null || \
                 warn "Some packages may have failed. Continuing..."
             ;;
         arch|manjaro)
-            sudo pacman -Sy --noconfirm gpsd python-pip xvfb-xorg-server 2>/dev/null || \
+            sudo pacman -Sy --noconfirm gpsd python-pip xvfb python-pipx 2>/dev/null || \
                 warn "Some packages may have failed. Continuing..."
             ;;
         fedora)
-            sudo dnf install -y gpsd python3-pip xorg-x11-server-Xvfb 2>/dev/null || \
+            sudo dnf install -y gpsd python3-pip xorg-x11-server-Xvfb python3-pipx 2>/dev/null || \
                 warn "Some packages may have failed. Continuing..."
             ;;
         darwin)
@@ -100,7 +100,7 @@ install_system_deps() {
             fi
             ;;
         *)
-            warn "Unknown OS '${OS}'. You may need to manually install: gpsd, python3-pip, xvfb"
+            warn "Unknown OS '${OS}'. You may need to manually install: gpsd, python3-pip, xvfb, pipx"
             ;;
     esac
 }
@@ -147,10 +147,14 @@ install_invisible_playwright
 
 # === Create config file ===
 setup_config() {
-    # Write config to ~/.hermes/ — a predictable path that persists
-    # regardless of where the repo is cloned or if it's deleted.
-    # Scripts installed to /usr/local/bin/ will find it here.
-    local config_dir="${HOME}/.hermes"
+    # Write config to the real user's home, even under sudo
+    local real_home
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        real_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    else
+        real_home="$HOME"
+    fi
+    local config_dir="${real_home}/.hermes"
     local config_file="${config_dir}/config.json"
     
     mkdir -p "$config_dir"
@@ -162,7 +166,7 @@ setup_config() {
     
     info "Creating configuration file..."
     
-    # Detect primary network interface IP
+    # Detect primary network interface IP (for phone app to connect to)
     local default_ip
     default_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "192.168.1.100")
     
@@ -171,15 +175,18 @@ setup_config() {
     default_tz=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}' || echo "America/New_York")
     
     # Create config.json
+    # Note: GPSD_HOST is always 127.0.0.1 for the agent's local gpsd connection.
+    # PHONE_TARGET_HOST is the IP the phone app should send NMEA data to.
     cat > "$config_file" << EOF
 {
-  "GPSD_HOST": "${default_ip}",
+  "GPSD_HOST": "127.0.0.1",
   "GPSD_UDP_PORT": 2948,
   "GPSD_TCP_PORT": 2947,
-  "LOCATION_CACHE_PATH": "${HOME}/.hermes/location.json",
-  "LOCATION_HISTORY_PATH": "${HOME}/.hermes/location-history.db",
-  "LOCATION_RAW_PATH": "${HOME}/.hermes/location-history.jsonl",
-  "PLACES_PATH": "${HOME}/.hermes/places.json",
+  "PHONE_TARGET_HOST": "${default_ip}",
+  "LOCATION_CACHE_PATH": "${real_home}/.hermes/location.json",
+  "LOCATION_HISTORY_PATH": "${real_home}/.hermes/location-history.db",
+  "LOCATION_RAW_PATH": "${real_home}/.hermes/location-history.jsonl",
+  "PLACES_PATH": "${real_home}/.hermes/places.json",
   "DEFAULT_CITY": "",
   "INVISIBLE_PYTHON_PATH": "${INVISIBLE_PYTHON:-}",
   "GPSD_SERVICE_NAME": "gpsd",
@@ -188,10 +195,14 @@ setup_config() {
 }
 EOF
     
+    # Fix ownership if running under sudo
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        sudo chown -R "${SUDO_USER}:${SUDO_USER}" "$config_dir"
+    fi
+    
     info "Config created: ${config_file}"
-    warn "Please edit ${config_file} to set GPSD_HOST to your phone-reachable IP address"
-    warn "For Tailscale: tailscale ip -4"
-    warn "For local network: hostname -I"
+    warn "PHONE_TARGET_HOST is set to ${default_ip} — configure your phone app to send NMEA to this IP"
+    warn "If using Tailscale, change PHONE_TARGET_HOST to your Tailscale IP: tailscale ip -4"
 }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -201,21 +212,24 @@ setup_config
 install_scripts() {
     info "Installing scripts to /usr/local/bin..."
     
-    local scripts=("gpsloc" "gpsnear" "gmaps" "places" "location-updater" "location-query" "location-compact" "location-prune" "location-landmark")
-    
-    for script in "${scripts[@]}"; do
-        if [[ -f "${SCRIPT_DIR}/scripts/${script}" ]]; then
-            sudo cp "${SCRIPT_DIR}/scripts/${script}" /usr/local/bin/
-            sudo chmod +x "/usr/local/bin/${script}"
-            info "  Installed: ${script}"
-        else
-            warn "  Not found: ${script}"
-        fi
+    # Copy all .py scripts from scripts/ dir, stripping .py extension
+    for script_path in "${SCRIPT_DIR}/scripts"/*.py; do
+        local script_name
+        script_name=$(basename "$script_path" .py)
+        sudo cp "$script_path" "/usr/local/bin/${script_name}"
+        sudo chmod +x "/usr/local/bin/${script_name}"
+        info "  Installed: ${script_name}"
     done
+    
+    # Copy config.py as well (needed by scripts via sys.path)
+    if [[ -f "${SCRIPT_DIR}/scripts/config.py" ]]; then
+        sudo cp "${SCRIPT_DIR}/scripts/config.py" "/usr/local/bin/config.py"
+        info "  Installed: config.py"
+    fi
     
     # Install parallel tool if available
     if [[ -f "${SCRIPT_DIR}/scripts/gpsnear-parallel" ]]; then
-        sudo cp "${SCRIPT_DIR}/scripts/gpsnear-parallel" /usr/local/bin/
+        sudo cp "${SCRIPT_DIR}/scripts/gpsnear-parallel" /usr/local/bin/gpsnear-parallel
         sudo chmod +x /usr/local/bin/gpsnear-parallel
         info "  Installed: gpsnear-parallel"
     fi
@@ -315,6 +329,46 @@ setup_firewall() {
 
 setup_firewall
 
+# === Install systemd services ===
+install_services() {
+    # Skip on macOS
+    if [[ "$OS" == "darwin" ]]; then
+        info "macOS detected — skipping systemd service setup"
+        return
+    fi
+    
+    if ! command -v systemctl &>/dev/null; then
+        warn "systemd not found — skipping service setup"
+        return
+    fi
+    
+    info "Installing systemd services..."
+    
+    # Copy service files
+    if [[ -f "${SCRIPT_DIR}/systemd/gpsd.service" ]]; then
+        sudo cp "${SCRIPT_DIR}/systemd/gpsd.service" /usr/lib/systemd/system/gpsd.service
+        info "  Installed: gpsd.service"
+    fi
+    
+    if [[ -f "${SCRIPT_DIR}/systemd/location-updater.service" ]]; then
+        sudo cp "${SCRIPT_DIR}/systemd/location-updater.service" /usr/lib/systemd/system/location-updater.service
+        info "  Installed: location-updater.service"
+    fi
+    
+    # Reload and enable
+    sudo systemctl daemon-reload
+    sudo systemctl enable gpsd.service 2>/dev/null || true
+    sudo systemctl enable location-updater.service 2>/dev/null || true
+    
+    # Start services
+    sudo systemctl start gpsd.service 2>/dev/null || true
+    sudo systemctl start location-updater.service 2>/dev/null || true
+    
+    info "Services installed and enabled"
+}
+
+install_services
+
 # === Create data directories ===
 setup_dirs() {
     mkdir -p "${HOME}/.hermes"
@@ -331,25 +385,22 @@ echo "  gps-agent-bridge installation complete"
 echo "============================================"
 echo ""
 echo "Next steps:"
-echo "  1. Edit config.json to set your GPSD_HOST IP address"
+echo "  1. Edit ~/.hermes/config.json to set PHONE_TARGET_HOST to your desktop's IP"
 echo "     For Tailscale: tailscale ip -4"
 echo "     For local network: hostname -I"
+echo "     (GPSD_HOST should stay as 127.0.0.1)"
 echo ""
 echo "  2. On your phone, install the GPS relay app:"
 echo "     Android: gpsdRelay (F-Droid)"
 echo "     iOS: NMEA Send Location (App Store, free)"
 echo ""
 echo "  3. Configure the app to send NMEA to:"
-echo "     IP: (your GPSD_HOST from step 1)"
-echo "     Port: ${GPSD_UDP_PORT:-2948}"
+echo "     IP: (your PHONE_TARGET_HOST from step 1)"
+echo "     Port: 2948"
 echo "     Protocol: UDP"
 echo ""
 echo "  4. Start streaming on your phone, then verify:"
 echo "     gpsloc --human"
 echo ""
-echo "  5. (Optional) Install the location updater service:"
-echo "     sudo cp systemd/location-updater.service /etc/systemd/system/"
-echo "     sudo systemctl enable --now location-updater"
-echo ""
-echo "Config file: ${SCRIPT_DIR}/config.json"
+echo "Config file: ~/.hermes/config.json"
 echo "Docs: ${SCRIPT_DIR}/README.md"

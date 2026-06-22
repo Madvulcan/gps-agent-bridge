@@ -1,7 +1,8 @@
 {
-  "GPSD_HOST": "192.168.1.100",
+  "GPSD_HOST": "127.0.0.1",
   "GPSD_UDP_PORT": 2948,
   "GPSD_TCP_PORT": 2947,
+  "PHONE_TARGET_HOST": "192.168.1.100",
   "LOCATION_CACHE_PATH": "~/.hermes/location.json",
   "LOCATION_HISTORY_PATH": "~/.hermes/location-history.db",
   "LOCATION_RAW_PATH": "~/.hermes/location-history.jsonl",

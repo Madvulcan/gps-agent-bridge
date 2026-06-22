@@ -1,0 +1,13 @@
+[Unit]
+Description=Location cache updater - writes GPS data from gpsd to local cache
+After=network.target gpsd.service
+Requires=gpsd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/location-updater
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
