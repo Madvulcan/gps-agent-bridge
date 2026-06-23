@@ -27,9 +27,11 @@ Any question that depends on the user's current position:
 - "Directions to X"
 - "What's the weather here?"
 - "Restaurants near me"
-- Anything involving "here", "near me", "from my location", "close by"
+- "Live music near me" / "What's happening near me tonight?"
+- "Events near me" / "What's going on around here?"
+- Anything involving "here", "near me", "from my location", "close by", "around here", "tonight near me"
 
-**For all of these: read `~/.hermes/location.json` first.** Don't rely on memory, don't ask the user, don't guess.
+**For all of these: read `~/.hermes/location.json` FIRST — before any other tool call.** Don't rely on memory, don't ask the user, don't guess. Don't use `mcp_dashboard_find_service` or Mnemosyne/memory lookups as a substitute for reading the live GPS cache. The file `~/.hermes/location.json` is the single source of truth for the user's current position.
 
 ## Architecture
 
@@ -47,9 +49,19 @@ Phone (GPS relay app) ──UDP:2948──► Desktop (gpsd) ──TCP:2947─�
 | Platform | App | Protocol | Cost | Setup |
 |----------|-----|----------|------|-------|
 | **Android** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free | Set Host IP, Port 2948, Protocol UDP |
-| **iOS** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 | Settings → UDP Push → set IP and Port 2948 |
+| **iOS (free)** | [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) | UDP | Free | Set Host IP, Port 2948, enable streaming |
+| **iOS (alt)** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 | Settings → UDP Push → set IP and Port 2948 |
 
 Both apps push standard NMEA 0183 sentences. The desktop setup is identical regardless of phone OS.
+
+### ⚠️ Transmission Interval (Battery Life)
+
+**Critical for battery life.** The default transmission interval is very frequent (~1 second), which drains battery in ~2 hours. Advise the user to increase it:
+
+- **60 seconds (60000ms):** Good balance of accuracy and battery life (~10+ hours)
+- **5-10 minutes (300000-600000ms):** Excellent battery life, sufficient for most "where am I?" use cases
+
+In gpsdRelay: Settings → Interval → set to desired value. The user should be told: "Increasing the transmission interval from 1s to 60s can extend battery life from ~2 hours to ~10+ hours."
 
 ## Key Commands
 
@@ -97,22 +109,27 @@ Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/loca
 
 0. **Operational rules go in this skill, NOT in memory.** When the user corrects your workflow, format, or approach, update this skill immediately. Memory is for environment facts and user preferences. Skills capture "how to do this class of task." If you find yourself writing a lesson to memory that's about *how to do something*, it belongs here instead.
 
+0. **ALWAYS ask the user before pushing to GitHub.** The user controls versioning (e.g., v1.0.1 vs v1.0.0), changelog content, and release timing. Never push without explicit approval. This rule is also in SOUL.md.
+
 1. **ALWAYS read `~/.hermes/location.json` first** for any location-dependent question.
    - If `status` is `"active"`, use the coordinates and address as normal.
-   - If `status` is `"unavailable"`, the phone's GPS stream is down (phone off, out of network, app killed, etc.). Handle gracefully:
-     - If the `DEFAULT_CITY` config value is set, say something like: "I can't see your live GPS right now, but based on your last known location, you're in [last known address]. Are you still in [DEFAULT_CITY]?"
-     - If no `DEFAULT_CITY` is set, ask: "I've lost connection to your phone's GPS. Where are you right now?"
+   - If `status` is `"unavailable"`, the phone's GPS stream is down (phone off, out of network, app killed, transmission interval too long, etc.). Handle gracefully:
+     - Check if `DEFAULT_CITY` is set in `~/.hermes/config.json`. If so, say: "I can't see your live GPS right now. Are you still in [DEFAULT_CITY]?"
+     - If no `DEFAULT_CITY`, ask: "I've lost connection to your phone's GPS. Where are you right now?"
      - Once the user confirms their location, you can still search for places near them using the city name, but note that distances/accuracy may be approximate.
+     - If the `weather` key exists in location.json, you can still report cached weather data but note it may be stale.
    - If the file doesn't exist at all, the system isn't set up yet. Ask the user to run the install script.
 2. **Always geocode via Nominatim** — never estimate coordinates. Use `gpsnear --address "..."` for precise haversine distance.
 3. **OSM/Nominatim has two different uses — don't confuse them:**
-   - **Reverse geocode** (coords → address): `https://nominatim.openstreetmap.org/reverse?lat=LAT&lon=LON` — This is how you turn coordinates into a human-readable address (e.g., "123 Main St, Springfield, IL"). This is reliable and should always be used when you need an address from coordinates.
+   - **Reverse geocode** (coords → address): `https://nominatim.openstreetmap.org/reverse?lat=LAT&lon=LON` — This is how you turn coordinates into a human-readable address (e.g., "Deery Street, Knoxville"). This is reliable and should always be used when you need an address from coordinates.
    - **Category search** (find nearby X): `https://nominatim.openstreetmap.org/search?q=restaurants` — This is unreliable and often returns 0 results. Use the browser tool (Google Maps) instead for finding nearby businesses.
    - If Nominatim returns 429 (rate limit), skip category search but **still use reverse geocoding** — it's a different endpoint and usually still works.
 4. **Check for closed businesses** — read snippets for "Permanently closed" markers.
 5. **Zip-code bias** — businesses in adjacent zips can be closer than same-zip results.
 6. **Always provide Google Maps links** — render as actual Markdown `[📍](url)` / `[🧭](url)`, NEVER in code blocks.
 7. **Response time target**: under 2 minutes. If longer, simplify — use browser tool directly.
+
+8. **NEVER use `mcp_dashboard_find_service` or memory/Mnemosyne lookups as a substitute for reading `~/.hermes/location.json`.** The dashboard tool searches for web services — it has nothing to do with GPS. Memory is stale; `location.json` is live. For any location-dependent question, `cat ~/.hermes/location.json` is always the first command.
 
 ## Search Strategy
 
@@ -237,6 +254,8 @@ No API key needed. Works on mobile (opens Maps app) and desktop. **Never wrap in
 - **Response time creep**: If >2 minutes, something went wrong.
 - **Nominatim rate limits**: The system uses a local SQLite geocoding cache (`~/.hermes/geocode-cache.db`) to avoid hitting OSM's rate limits. If the user moves less than 50m, the cached address is reused.
 - **Weather data**: Fetched from Open-Meteo (free, no API key) every 10 minutes and cached in `location.json`. May be slightly stale.
+- **GPS unavailable**: When `status` is `"unavailable"`, fall back to `DEFAULT_CITY` config value or ask the user. Can still report cached weather but note it may be stale.
+- **Transmission interval**: Default ~1s drains battery in ~2h. Recommend 60s (good balance) or 5-10 min (maximum battery). User should configure this in the phone app settings.
 
 ## Advanced Features
 
@@ -290,3 +309,5 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 | Firewall blocking | `sudo ufw status` |
 | OSM category search rate limit | Use browser tool (Google Maps) for finding nearby businesses. Reverse geocoding (coords → address) uses a different endpoint and usually still works. |
 | location.json address empty | Use lat/lon directly or run `gpsloc --human` |
+| GPS status "unavailable" | Phone app not streaming, out of network, or battery optimization killed the app. Ask user to check phone app and increase transmission interval. |
+| places.py command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |
