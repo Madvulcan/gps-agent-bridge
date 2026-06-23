@@ -31,7 +31,7 @@ Instead of asking "Where are you?" or guessing based on old context, your agent 
 ```
 ┌─────────────────┐     UDP NMEA     ┌─────────────────┐     JSON      ┌──────────┐
 │  Smartphone      │ ──────────────► │  Linux Desktop   │ ──────────► │  Agent    │
-│  (GPS relay app) │   port 2948     │  (gpsd daemon)   │   port 2947  │  (you)    │
+│  (GPS relay app) │   port 2948     │  (gpsd daemon)   │   port 2947  │          │
 └─────────────────┘                  └─────────────────┘              └──────────┘
 ```
 
