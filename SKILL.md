@@ -308,4 +308,6 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 | OSM category search rate limit | Use browser tool (Google Maps) for finding nearby businesses. Reverse geocoding (coords → address) uses a different endpoint and usually still works. |
 | location.json address empty | Use lat/lon directly or run `gpsloc --human` |
 | GPS status "unavailable" | Phone app not streaming, out of network, or battery optimization killed the app. Ask user to check phone app and increase transmission interval. |
-| places.py command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |
+| places command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |
+| gpsd won't start (SHM error) | Shared memory conflict. Run: `sudo bash -c 'killall -9 gpsd; rm -f /run/gpsd.sock; for key in $(ipcs -m | grep root | awk "{print \$2}"); do ipcrm -m \$key 2>/dev/null; done; systemctl start gpsd.service'` |
+| gpsd starts then exits | Ensure `-N` flag is present in systemd service (gpsd forks to background). Without `-N`, gpsd stays in foreground and systemd considers it "exited". |

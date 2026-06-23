@@ -278,6 +278,15 @@ journalctl -u gpsd --no-pager -n 20
 ```
 Common cause: port already in use. Check: `ss -ulnp | grep 2948`
 
+### "gpsd won't start (SHM error)"
+If you see `SHM: shmctl(...) for IPC_RMID failed, Operation not permitted`, there are stale shared memory segments from a previous gpsd instance. Fix:
+```bash
+sudo bash -c 'killall -9 gpsd 2>/dev/null; rm -f /run/gpsd.sock; for key in $(ipcs -m | grep root | awk "{print \$2}"); do ipcrm -m \$key 2>/dev/null; done; systemctl start gpsd.service'
+```
+
+### "gpsd starts then exits immediately"
+The systemd service needs the `-N` flag (no-wait, forks to background). Without it, gpsd stays in the foreground and systemd considers it "exited successfully". Check `/usr/lib/systemd/system/gpsd.service` — the ExecStart should include `-N`.
+
 ### "Phone connects but no GPS fix"
 - The phone needs a clear view of the sky for the first fix (cold start can take 30-60 seconds)
 - Once it has a fix, it'll update continuously
