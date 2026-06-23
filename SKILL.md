@@ -109,8 +109,6 @@ Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/loca
 
 0. **Operational rules go in this skill, NOT in memory.** When the user corrects your workflow, format, or approach, update this skill immediately. Memory is for environment facts and user preferences. Skills capture "how to do this class of task." If you find yourself writing a lesson to memory that's about *how to do something*, it belongs here instead.
 
-0. **ALWAYS ask the user before pushing to GitHub.** The user controls versioning (e.g., v1.0.1 vs v1.0.0), changelog content, and release timing. Never push without explicit approval. This rule is also in SOUL.md.
-
 1. **ALWAYS read `~/.hermes/location.json` first** for any location-dependent question.
    - If `status` is `"active"`, use the coordinates and address as normal.
    - If `status` is `"unavailable"`, the phone's GPS stream is down (phone off, out of network, app killed, transmission interval too long, etc.). Handle gracefully:
