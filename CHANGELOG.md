@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.3] - 2026-06-25
+
+### Changed
+- **GPS AgentBridge now recommended as primary Android app** — All documentation updated to recommend [GPS AgentBridge](https://github.com/Madvulcan/GPS-AgentBridge-Android) (our companion app with distance-based transmission) over gpsdRelay. gpsdRelay remains as an alternative for users who prefer F-Droid.
+- **SKILL.md** — Architecture diagram, phone setup table, transmission interval guidance, and troubleshooting updated to reflect GPS AgentBridge as primary.
+- **AgentInstructions.md** — Phase 3 now has a full GPS AgentBridge walkthrough (APK install, onboarding flow, destination server setup) with gpsdRelay as alternative.
+- **README.md** — Platform table, architecture diagram, and manual setup steps updated.
+- **install.sh** — Summary output now shows GPS AgentBridge with download URL and install command.
+
 ## [1.0.2] - 2026-06-25
 
 ### Fixed
