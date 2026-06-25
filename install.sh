@@ -341,12 +341,21 @@ install_services() {
     
     info "Installing systemd services..."
     
-    # Copy service files from systemd/ dir
+    # Determine real home directory (handles sudo)
+    local real_home
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        real_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    else
+        real_home="$HOME"
+    fi
+    
+    # Copy service files from systemd/ dir, templating __HOME__ placeholder
     for svc_path in "${SCRIPT_DIR}/systemd"/*.service; do
         local svc_name
         svc_name=$(basename "$svc_path")
-        sudo cp "$svc_path" "/usr/lib/systemd/system/${svc_name}"
-        info "  Installed: ${svc_name}"
+        # Replace __HOME__ placeholder with the actual home directory
+        sed "s|__HOME__|${real_home}|g" "$svc_path" | sudo tee "/usr/lib/systemd/system/${svc_name}" > /dev/null
+        info "  Installed: ${svc_name} (HOME=${real_home})"
     done
     
     # Reload and enable

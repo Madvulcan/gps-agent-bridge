@@ -5,7 +5,7 @@ Requires=gpsd.service
 
 [Service]
 Type=simple
-User=madvulcan
+Environment=HOME=__HOME__
 ExecStart=/usr/local/bin/location-updater
 Restart=on-failure
 RestartSec=10

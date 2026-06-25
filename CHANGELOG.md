@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.4] - 2026-06-25
+
+### Fixed
+- **location-updater wrote to /root/ instead of user home** — Service ran as root with no `User=` directive, so `~/.hermes/` resolved to `/root/.hermes/`. Fixed by adding `Environment=HOME=__HOME__` to the service template, which install.sh replaces with the actual home directory at install time. No hardcoded usernames.
+- **gpsd-watcher had the same bug** — Also writes to `~/.hermes/location.json`. Same fix applied.
+- **install.sh now templates service files** — Replaces `__HOME__` placeholder in `.service` files with the detected home directory (handles `sudo` via `SUDO_USER`).
+
 ## [1.0.3] - 2026-06-25
 
 ### Changed
