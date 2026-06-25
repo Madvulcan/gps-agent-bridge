@@ -5,6 +5,7 @@ Requires=gpsd.service
 
 [Service]
 Type=simple
+User=madvulcan
 ExecStart=/usr/local/bin/gpsd-watcher
 Restart=on-failure
 RestartSec=5
