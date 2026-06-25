@@ -15,16 +15,41 @@ Requires: gpsd running on localhost:2947
 import sys
 import json
 import socket
+import time
 
 GPSD_HOST = "127.0.0.1"
 GPSD_PORT = 2947
 TIMEOUT = 5
+CACHE_TIMEOUT = 700  # 11+ minutes to cover the 10-min max interval
+TPV_CACHE = "/tmp/gpsd-last-tpv.json"
+TPV_CACHE_MAX_AGE = 700  # seconds - use cached TPV if younger than this
 
 
-def get_gps_data():
-    """Connect to gpsd and get the latest TPV report."""
+def get_cached_tpv():
+    """Read the last TPV from the persistent gpsd-watcher cache."""
+    import os
+    if not os.path.exists(TPV_CACHE):
+        return None
+    try:
+        mtime = os.path.getmtime(TPV_CACHE)
+        age = time.time() - mtime
+        if age > TPV_CACHE_MAX_AGE:
+            return None  # stale
+        with open(TPV_CACHE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def get_gps_data(timeout=None):
+    """Connect to gpsd and get the latest TPV report.
+    
+    If timeout is None, uses CACHE_TIMEOUT (long wait for UDP sources).
+    If timeout is an int, uses that specific timeout.
+    """
+    actual_timeout = timeout if timeout is not None else CACHE_TIMEOUT
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(TIMEOUT)
+    sock.settimeout(actual_timeout)
     sock.connect((GPSD_HOST, GPSD_PORT))
 
     # Request JSON watch mode
@@ -50,11 +75,18 @@ def get_gps_data():
 def main():
     args = sys.argv[1:]
 
-    try:
-        data = get_gps_data()
-    except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        print(json.dumps({"error": str(e), "host": GPSD_HOST, "port": GPSD_PORT}))
-        sys.exit(1)
+    # First try the persistent cache (instant, no gpsd connection needed)
+    data = get_cached_tpv()
+    if data is not None:
+        # Got cached TPV - use it directly
+        pass
+    else:
+        # No cache or stale - fall back to connecting to gpsd
+        try:
+            data = get_gps_data()
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            print(json.dumps({"error": str(e), "host": GPSD_HOST, "port": GPSD_PORT}))
+            sys.exit(1)
 
     if data is None:
         print(json.dumps({"error": "No TPV data received from gpsd"}))

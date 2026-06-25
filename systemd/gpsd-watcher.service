@@ -1,0 +1,13 @@
+[Unit]
+Description=Persistent gpsd watcher - caches latest TPV for gpsloc
+After=network.target gpsd.service
+Requires=gpsd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gpsd-watcher
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -212,10 +212,14 @@ setup_config
 install_scripts() {
     info "Installing scripts to /usr/local/bin..."
     
-    # Copy all .py scripts from scripts/ dir, stripping .py extension
-    for script_path in "${SCRIPT_DIR}/scripts"/*.py; do
+    # Copy all scripts from scripts/ dir (both .py and extensionless)
+    for script_path in "${SCRIPT_DIR}/scripts"/*; do
+        # Skip service files, directories, and config helper
         local script_name
-        script_name=$(basename "$script_path" .py)
+        script_name=$(basename "$script_path")
+        [[ -d "$script_path" ]] && continue
+        [[ "$script_name" == *.service ]] && continue
+        [[ "$script_name" == config.py ]] && continue
         sudo cp "$script_path" "/usr/local/bin/${script_name}"
         sudo chmod +x "/usr/local/bin/${script_name}"
         info "  Installed: ${script_name}"
@@ -225,13 +229,6 @@ install_scripts() {
     if [[ -f "${SCRIPT_DIR}/scripts/config.py" ]]; then
         sudo cp "${SCRIPT_DIR}/scripts/config.py" "/usr/local/bin/config.py"
         info "  Installed: config.py"
-    fi
-    
-    # Install parallel tool if available
-    if [[ -f "${SCRIPT_DIR}/scripts/gpsnear-parallel" ]]; then
-        sudo cp "${SCRIPT_DIR}/scripts/gpsnear-parallel" /usr/local/bin/gpsnear-parallel
-        sudo chmod +x /usr/local/bin/gpsnear-parallel
-        info "  Installed: gpsnear-parallel"
     fi
 }
 
@@ -344,24 +341,23 @@ install_services() {
     
     info "Installing systemd services..."
     
-    # Copy service files
-    if [[ -f "${SCRIPT_DIR}/systemd/gpsd.service" ]]; then
-        sudo cp "${SCRIPT_DIR}/systemd/gpsd.service" /usr/lib/systemd/system/gpsd.service
-        info "  Installed: gpsd.service"
-    fi
-    
-    if [[ -f "${SCRIPT_DIR}/systemd/location-updater.service" ]]; then
-        sudo cp "${SCRIPT_DIR}/systemd/location-updater.service" /usr/lib/systemd/system/location-updater.service
-        info "  Installed: location-updater.service"
-    fi
+    # Copy service files from systemd/ dir
+    for svc_path in "${SCRIPT_DIR}/systemd"/*.service; do
+        local svc_name
+        svc_name=$(basename "$svc_path")
+        sudo cp "$svc_path" "/usr/lib/systemd/system/${svc_name}"
+        info "  Installed: ${svc_name}"
+    done
     
     # Reload and enable
     sudo systemctl daemon-reload
     sudo systemctl enable gpsd.service 2>/dev/null || true
+    sudo systemctl enable gpsd-watcher.service 2>/dev/null || true
     sudo systemctl enable location-updater.service 2>/dev/null || true
     
     # Start services
     sudo systemctl start gpsd.service 2>/dev/null || true
+    sudo systemctl start gpsd-watcher.service 2>/dev/null || true
     sudo systemctl start location-updater.service 2>/dev/null || true
     
     info "Services installed and enabled"
