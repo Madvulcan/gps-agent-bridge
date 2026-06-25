@@ -26,8 +26,9 @@ Then ask:
 
 **"Are you using an Android phone or an iPhone?"**
 
-- **Android** → They'll install [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) from F-Droid (free)
-- **iOS** → They'll install [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) from the App Store (~$5)
+- **Android (recommended)** → They'll install [GPS AgentBridge](https://github.com/Madvulcan/GPS-AgentBridge-Android) — our companion app with distance-based transmission for battery efficiency. Download the APK from the releases page and install via `adb install` or file manager.
+- **Android (alternative)** → They can also use [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) from F-Droid (free), but it uses fixed-interval polling which drains more battery.
+- **iOS** → They'll install [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) from the App Store (free), or [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) (~$5) as an alternative.
 
 ### 2. Network setup
 
@@ -171,9 +172,28 @@ If the user is on macOS, explain that they'll need to:
 
 ---
 
-### Android (gpsdRelay)
+### Android (GPS AgentBridge — recommended)
 
 Walk the user through:
+
+1. On their computer (or yours), download the APK from [GitHub releases](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases)
+2. Install it on the phone:
+   - Via ADB: `adb install gps-agent-bridge-v1.0.0-release.apk`
+   - Or transfer the APK file to the phone and install from the file manager
+3. Open the app — it will launch the onboarding flow
+4. **Grant location permission** — tap "Grant foreground location," then "Grant background location"
+5. **Disable battery optimization** — tap "Disable battery optimization" (critical for reliable background streaming)
+6. Go to **Settings → Destination servers** → add a new target:
+   - **Host:** The IP address from Phase 1
+   - **Port:** 2948
+7. Return to the main screen and tap **START**
+8. The app handles transmission intervals automatically — no manual configuration needed. It uses distance-based triggers (default: 500m threshold, 10-min max interval) for optimal battery life.
+
+> 💡 **Battery tip:** GPS AgentBridge uses distance-based transmission — it only sends when you've moved >500m, with a 10-min max interval safety net. This provides <0.2%/hour battery drain when stationary, vs ~2-5%/hour with fixed-interval apps. Adjust thresholds in Settings if needed.
+
+### Android (gpsdRelay — alternative)
+
+If the user prefers F-Droid or can't sideload APKs:
 
 1. Open F-Droid on their phone
 2. Search for "gpsdRelay" and install it
@@ -183,9 +203,9 @@ Walk the user through:
 6. Set **Port:** 2948
 7. Set **NMEA source:** Auto (or Generated if Auto doesn't work)
 8. Tap the play button (▶) to start streaming
-9. **Configure transmission interval** — In gpsdRelay settings, look for "Interval" or "Update frequency." The default is very frequent (every ~1 second), which drains battery quickly. **Recommended:** Set to 60 seconds (60000ms) for good balance of accuracy and battery life. For even better battery savings, 5-10 minutes (300000-600000ms) works well if you don't need real-time precision.
+9. **Configure transmission interval** — In gpsdRelay settings, look for "Interval" or "Update frequency." The default is very frequent (every ~1 second), which drains battery quickly. **Recommended:** Set to 60 seconds (60000ms) for good balance of accuracy and battery life.
 
-> 💡 **Battery tip:** Increasing the transmission interval from 1s to 60s can extend battery life from ~2 hours to ~10+ hours. Even 5-10 minute intervals are sufficient for most "where am I?" use cases.
+> ⚠️ **Note:** gpsdRelay uses fixed-interval polling which drains significantly more battery than GPS AgentBridge's distance-based triggers. Recommend GPS AgentBridge if possible.
 
 ### iOS (GPS2IP)
 

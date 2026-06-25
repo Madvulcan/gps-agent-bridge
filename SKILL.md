@@ -36,32 +36,35 @@ Any question that depends on the user's current position:
 ## Architecture
 
 ```
-Phone (GPS relay app) ──UDP:2948──► Desktop (gpsd) ──TCP:2947──► Clients
-                                                          │
-                                                 ┌────────┴────────┐
-                                                 │  location.json   │  hot cache (30s)
-                                                 │  location.db     │  tiered history
-                                                 └─────────────────┘
+Phone (GPS AgentBridge) ──UDP:2948──► Desktop (gpsd) ──TCP:2947──► Clients
+                                                              │
+                                                     ┌────────┴────────┐
+                                                     │  location.json   │  hot cache (30s)
+                                                     │  location.db     │  tiered history
+                                                     └─────────────────┘
 ```
 
 ## Phone Setup
 
 | Platform | App | Protocol | Cost | Setup |
 |----------|-----|----------|------|-------|
-| **Android** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free | Set Host IP, Port 2948, Protocol UDP |
+| **Android (recommended)** | [GPS AgentBridge](https://github.com/Madvulcan/GPS-AgentBridge-Android) | UDP | Free | Install APK, complete onboarding, add desktop IP:2948 as target |
+| **Android (alt)** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free | Set Host IP, Port 2948, Protocol UDP |
 | **iOS (free)** | [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) | UDP | Free | Set Host IP, Port 2948, enable streaming |
 | **iOS (alt)** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 | Settings → UDP Push → set IP and Port 2948 |
 
-Both apps push standard NMEA 0183 sentences. The desktop setup is identical regardless of phone OS.
+**GPS AgentBridge** is the companion app built specifically for this project. It uses distance-based transmission (only sends when you move >X meters) instead of fixed-interval polling, dramatically reducing battery drain. Download the APK from the [releases page](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases).
 
-### ⚠️ Transmission Interval (Battery Life)
+All apps push standard NMEA 0183 sentences. The desktop setup is identical regardless of phone OS.
 
-**Critical for battery life.** The default transmission interval is very frequent (~1 second), which drains battery in ~2 hours. Advise the user to increase it:
+### ⚠️ Transmission Interval / Battery Life
+
+**For GPS AgentBridge users:** The app handles this automatically with distance-based triggers. Default settings (500m threshold, 10-min max interval, 20m accuracy gate) provide excellent battery life. No manual interval configuration needed.
+
+**For gpsdRelay / other fixed-interval apps:** The default transmission interval is very frequent (~1 second), which drains battery in ~2 hours. Advise the user to increase it:
 
 - **60 seconds (60000ms):** Good balance of accuracy and battery life (~10+ hours)
 - **5-10 minutes (300000-600000ms):** Excellent battery life, sufficient for most "where am I?" use cases
-
-In gpsdRelay: Settings → Interval → set to desired value. The user should be told: "Increasing the transmission interval from 1s to 60s can extend battery life from ~2 hours to ~10+ hours."
 
 ## Key Commands
 
@@ -307,7 +310,7 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 | Firewall blocking | `sudo ufw status` |
 | OSM category search rate limit | Use browser tool (Google Maps) for finding nearby businesses. Reverse geocoding (coords → address) uses a different endpoint and usually still works. |
 | location.json address empty | Use lat/lon directly or run `gpsloc --human` |
-| GPS status "unavailable" | Phone app not streaming, out of network, or battery optimization killed the app. Ask user to check phone app and increase transmission interval. |
+| GPS status "unavailable" | Phone app not streaming, out of network, or battery optimization killed the app. Ask user to check phone app and ensure battery optimization is disabled. For GPS AgentBridge: check that the START button was pressed and the service is running. For gpsdRelay: increase transmission interval. |
 | places command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |
 | gpsd won't start (SHM error) | Shared memory conflict. Run: `sudo bash -c 'killall -9 gpsd; rm -f /run/gpsd.sock; for key in $(ipcs -m | grep root | awk "{print \$2}"); do ipcrm -m \$key 2>/dev/null; done; systemctl start gpsd.service'` |
 | gpsd starts then exits | Ensure `-N` flag is present in systemd service (gpsd forks to background). Without `-N`, gpsd stays in foreground and systemd considers it "exited". |

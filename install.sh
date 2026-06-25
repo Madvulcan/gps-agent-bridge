@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gps-agent-bridge install script
 # Sets up GPS relay from mobile phone to Linux desktop via gpsd.
-# Supports Android (gpsdRelay) and iOS (GPS2IP).
+# Supports Android (GPS AgentBridge, gpsdRelay) and iOS (NMEA Send Location, GPS2IP).
 #
 # Usage:
 #   ./install.sh              # Full install (requires sudo)
@@ -387,7 +387,10 @@ echo "     For local network: hostname -I"
 echo "     (GPSD_HOST should stay as 127.0.0.1)"
 echo ""
 echo "  2. On your phone, install the GPS relay app:"
-echo "     Android: gpsdRelay (F-Droid)"
+echo "     Android (recommended): GPS AgentBridge"
+echo "       Download APK: https://github.com/Madvulcan/GPS-AgentBridge-Android/releases"
+echo "       Install via: adb install gps-agent-bridge-v1.0.0-release.apk"
+echo "     Android (alternative): gpsdRelay (F-Droid)"
 echo "     iOS: NMEA Send Location (App Store, free)"
 echo ""
 echo "  3. Configure the app to send NMEA to:"
