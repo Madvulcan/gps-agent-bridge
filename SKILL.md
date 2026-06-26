@@ -53,7 +53,7 @@ Phone (GPS AgentBridge) ──UDP:2948──► Desktop (gpsd) ──TCP:2947─
 | **iOS (free)** | [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) | UDP | Free | Set Host IP, Port 2948, enable streaming |
 | **iOS (alt)** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 | Settings → UDP Push → set IP and Port 2948 |
 
-**GPS AgentBridge** is the companion app built specifically for this project. It uses distance-based transmission (only sends when you move >X meters) instead of fixed-interval polling, dramatically reducing battery drain. As of v1.2.0, it also features **adaptive GPS polling** — when stationary, the internal GPS polling gradually backs off from 30s → 2min → 5min, and when the phone screen is off for >2 minutes, it throttles to 5min intervals. Movement or screen-on snaps back to 30s instantly. Download the APK from the [releases page](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases).
+**GPS AgentBridge** is the companion app built specifically for this project. It uses distance-based transmission (only sends when you move >X meters) instead of fixed-interval polling, dramatically reducing battery drain. As of v1.3.0, it also features **deep sleep mode** with significant motion sensor wake-up — when stationary, the internal GPS polling gradually backs off from 30s → 2min → 5min, and when the phone screen is off for >2 minutes, it throttles to 5min intervals. Movement or screen-on snaps back to 30s instantly. Download the APK from the [releases page](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases).
 
 Two builds are available:
 - **Standard** (~2 MB) — uses Google Play Services for sensor fusion (better battery, faster indoor fixes). For most phones.
