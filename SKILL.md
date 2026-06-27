@@ -16,7 +16,7 @@ The user's phone streams GPS NMEA data over UDP to **gpsd** on the desktop. A ba
 cat ~/.hermes/location.json
 ```
 
-This gives you: `lat`, `lon`, `address`, `timestamp`, `status`. If `status` is `"active"`, the location is fresh (≤30s old). If `"unavailable"`, ask the user for their location.
+This gives you: `lat`, `lon`, `address`, `timestamp`, `status`, `speed` (m/s), `track` (heading°), `alt` (meters), `eph` (accuracy meters). If `status` is `"active"`, the location is fresh (≤30s old). If `"unavailable"`, ask the user for their location.
 
 ### What "location-dependent" means
 
@@ -53,7 +53,7 @@ Phone (GPS AgentBridge) ──UDP:2948──► Desktop (gpsd) ──TCP:2947─
 | **iOS (free)** | [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) | UDP | Free | Set Host IP, Port 2948, enable streaming |
 | **iOS (alt)** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 | Settings → UDP Push → set IP and Port 2948 |
 
-**GPS AgentBridge** is the companion app built specifically for this project. It uses distance-based transmission (only sends when you move >X meters) instead of fixed-interval polling, dramatically reducing battery drain. As of v1.3.0, it also features **deep sleep mode** with significant motion sensor wake-up — when stationary, the internal GPS polling gradually backs off from 30s → 2min → 5min, and when the phone screen is off for >2 minutes, it throttles to 5min intervals. Movement or screen-on snaps back to 30s instantly. Download the APK from the [releases page](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases).
+**GPS AgentBridge** is the companion app built specifically for this project. It uses distance-based transmission (only sends when you move >X meters) instead of fixed-interval polling, dramatically reducing battery drain. As of v1.3.0, it features **deep sleep mode** with significant motion sensor wake-up — GPS polling follows four states: ACTIVE (30s) → SETTLING (2min) → IDLE (5min) → SLEEP (GPS off, hardware motion sensor armed at <0.01%/hr). When stationary + screen off >5min, GPS turns completely off. The significant motion sensor fires when the phone is physically moved, snapping back to active polling instantly. As of v1.3.1, the onboarding also requests the `POST_NOTIFICATIONS` permission (required on Android 13+ for the foreground service notification to appear). Download the APK from the [releases page](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases).
 
 Two builds are available:
 - **Standard** (~2 MB) — uses Google Play Services for sensor fusion (better battery, faster indoor fixes). For most phones.
@@ -63,7 +63,7 @@ All apps push standard NMEA 0183 sentences. The desktop setup is identical regar
 
 ### ⚠️ Transmission Interval / Battery Life
 
-**For GPS AgentBridge users:** The app handles this automatically with distance-based triggers. Default settings (500m threshold, 10-min max interval, 20m accuracy gate) provide excellent battery life. As of v1.2.0, adaptive GPS polling further reduces battery drain when stationary (GPS backs off from 30s → 2min → 5min intervals; screen-off throttles to 5min). No manual interval configuration needed.
+**For GPS AgentBridge users:** The app handles this automatically with distance-based triggers + deep sleep. Default settings (500m threshold, 10-min max interval, 20m accuracy gate) provide excellent battery life. As of v1.3.0, adaptive GPS polling + significant motion sensor further reduce battery drain. When stationary + screen off >5min, GPS turns **completely off** and the hardware motion sensor is armed (<0.01%/hr). No manual interval configuration needed. Note: in sleep mode, the first fix after waking may take ~30s.
 
 **For gpsdRelay / other fixed-interval apps:** The default transmission interval is very frequent (~1 second), which drains battery in ~2 hours. Advise the user to increase it:
 
@@ -75,6 +75,13 @@ All apps push standard NMEA 0183 sentences. The desktop setup is identical regar
 ### Current location (ALWAYS FIRST)
 ```bash
 cat ~/.hermes/location.json
+```
+
+### Full GPS data (for scripts)
+```bash
+gpsloc --tpv          # Raw TPV JSON (single line, for piping)
+gpsloc                # Pretty-printed TPV JSON
+gpsloc --human        # Human-readable: lat/lon/alt/speed/heading/accuracy/fix
 ```
 
 ### Find nearby places
@@ -96,11 +103,11 @@ location-query --recent 2h
 
 ## Location Cache
 
-The hot cache at `~/.hermes/location.json` is updated every 30 seconds. Check `status` field — if `"unavailable"`, the GPS stream is down.
+The hot cache at `~/.hermes/location.json` is updated every 30 seconds. Check `status` field — if `"unavailable"`, the GPS stream is down. The cache also includes `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) — useful for distinguishing driving from walking, detecting brief stops vs. true destinations.
 
 ## Location History (Tiered)
 
-Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/location-history.jsonl` are pruned to 48h rolling window. Total storage: ~2-3MB/year.
+Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/location-history.jsonl` are pruned to 48h rolling window. Total storage: ~3-3.5MB/year. History entries include `speed`, `track`, `alt`, and `eph` alongside coordinates and address.
 
 ## Services & Cron Jobs
 
@@ -259,7 +266,7 @@ No API key needed. Works on mobile (opens Maps app) and desktop. **Never wrap in
 - **Response time creep**: If >2 minutes, something went wrong.
 - **Nominatim rate limits**: The system uses a local SQLite geocoding cache (`~/.hermes/geocode-cache.db`) to avoid hitting OSM's rate limits. If the user moves less than 50m, the cached address is reused.
 - **Weather data**: Fetched from Open-Meteo (free, no API key) every 10 minutes and cached in `location.json`. May be slightly stale.
-- **GPS unavailable**: When `status` is `"unavailable"`, fall back to `DEFAULT_CITY` config value or ask the user. Can still report cached weather but note it may be stale.
+- **GPS unavailable**: When `status` is `"unavailable"`, this may be **normal deep sleep behavior** (phone stationary + screen off >5min → GPS off, motion sensor armed). Only treat as a problem if the user is actively using the phone. In that case, the streaming service may have been killed (e.g., after APK update) — ask user to open app and tap START. Fall back to `DEFAULT_CITY` config value or ask the user. Can still report cached weather but note it may be stale.
 - **Transmission interval**: For GPS AgentBridge users, this is handled automatically (distance-based + adaptive polling). For gpsdRelay / other fixed-interval apps, default ~1s drains battery in ~2h. Recommend 60s (good balance) or 5-10 min (maximum battery).
 
 ## Advanced Features
@@ -314,7 +321,8 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 | Firewall blocking | `sudo ufw status` |
 | OSM category search rate limit | Use browser tool (Google Maps) for finding nearby businesses. Reverse geocoding (coords → address) uses a different endpoint and usually still works. |
 | location.json address empty | Use lat/lon directly or run `gpsloc --human` |
-| GPS status "unavailable" | Phone app not streaming, out of network, or battery optimization killed the app. Ask user to check phone app and ensure battery optimization is disabled. For GPS AgentBridge: check that START was pressed and the service is running; adaptive polling may mean the app polls less frequently when stationary (5min intervals) — wait a bit longer. For gpsdRelay: increase transmission interval. |
+| GPS status "unavailable" | **First determine if this is normal deep sleep or a real problem.** If phone is stationary + screen off >5min, deep sleep is expected — `unavailable` is normal. If user is actively using phone, the streaming service may be killed (check: open app → tap START). Use `tcpdump udp port 2948` to verify if packets arrive. If phone says "sent" but no packets arrive, the destination server list may be empty (cleared by uninstall+reinstall). For gpsdRelay: increase transmission interval. See references/android-companion-app.md "Deep Sleep Diagnostic" for full decision tree. |
+| Notification not appearing (Android 13+) | The `POST_NOTIFICATIONS` runtime permission must be granted. Without it, the foreground service notification is silently blocked. The v1.3.1+ onboarding requests this permission. On older versions: go to Android Settings → Apps → GPS AgentBridge → Notifications → enable. |
 | location-updater writing to /root/ | Service missing `Environment=HOME=` — run `./install.sh` to re-template the service files, or check that `/usr/lib/systemd/system/location-updater.service` has `Environment=HOME=/home/USER` |
 | gpsd-watcher writing to /root/ | Same fix as location-updater — `Environment=HOME=` in the service file |
 | places command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |

@@ -5,11 +5,12 @@ location-updater - Continuously update location cache from gpsd.
 Runs as a background process, refreshing every 30 seconds.
 Writes:
   - ~/.hermes/location.json          (hot cache - latest location)
-  - ~/.hermes/location-history.jsonl (warm - 24h rolling log)
+  - ~/.hermes/location-history.jsonl (warm - 48h rolling log)
 
 Features:
   - Reverse-geocoding cache (SQLite) to avoid Nominatim rate limits
   - Weather/AQI enrichment via Open-Meteo (free, no API key)
+  - Full TPV data (speed, heading, altitude, accuracy) persisted in cache and history
 """
 
 import json
@@ -28,12 +29,12 @@ from config import get_config
 
 config = get_config()
 
-GPSLOC_CMD = ["gpsloc", "--latlon"]
+GPSLOC_CMD = ["gpsloc", "--tpv"]
 CACHE_FILE = config.get("LOCATION_CACHE_PATH", os.path.expanduser("~/.hermes/location.json"))
 HISTORY_FILE = config.get("LOCATION_RAW_PATH", os.path.expanduser("~/.hermes/location-history.jsonl"))
 GEOCACHE_FILE = os.path.expanduser("~/.hermes/geocode-cache.db")
 REFRESH_INTERVAL = 30       # seconds
-MAX_HISTORY_HOURS = 24      # rolling window
+MAX_HISTORY_HOURS = 48      # rolling window
 MIN_MOVE_DISTANCE = 50      # meters - don't log if moved less than this
 GEOCODE_CACHE_RADIUS = 50   # meters - reuse cache if within this distance
 WEATHER_REFRESH_INTERVAL = 600  # seconds - refresh weather every 10 minutes
@@ -127,14 +128,19 @@ def fetch_weather_aqi(lat, lon):
         return None
 
 
-def get_latlon():
-    """Run gpsloc and return (lat, lon) or None."""
+def get_tpv():
+    """Run gpsloc --tpv and return the full TPV dict, or None if unavailable."""
     try:
         result = subprocess.run(GPSLOC_CMD, capture_output=True, text=True, timeout=15)
-        if result.returncode == 0 and "," in result.stdout:
-            lat, lon = result.stdout.strip().split(",")
-            return float(lat), float(lon)
-    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout.strip())
+            # Validate it's a TPV with actual coordinates
+            if data.get("class") == "TPV" and data.get("mode", 0) >= 2:
+                lat = data.get("lat")
+                lon = data.get("lon")
+                if lat is not None and lon is not None and lat != 0.0 and lon != 0.0:
+                    return data
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError, json.JSONDecodeError):
         pass
     return None
 
@@ -191,10 +197,10 @@ def main():
     current_weather = None
 
     while True:
-        result = get_latlon()
+        tpv = get_tpv()
         now = datetime.now(timezone.utc)
 
-        if result is None:
+        if tpv is None:
             # GPS unavailable - write stale marker
             cache = {
                 "status": "unavailable",
@@ -208,7 +214,8 @@ def main():
             time.sleep(REFRESH_INTERVAL)
             continue
 
-        lat, lon = result
+        lat = tpv.get("lat")
+        lon = tpv.get("lon")
         
         # Reverse geocode (with cache to avoid Nominatim rate limits)
         address = reverse_geocode(lat, lon, geocache_conn)
@@ -220,13 +227,17 @@ def main():
                 current_weather = weather
             last_weather_fetch = time.time()
 
-        # Hot cache - always update
+        # Hot cache - always update (include full TPV fields)
         cache = {
             "status": "active",
             "timestamp": now.isoformat(),
             "lat": lat,
             "lon": lon,
-            "address": address
+            "address": address,
+            "speed": tpv.get("speed"),
+            "track": tpv.get("track"),
+            "alt": tpv.get("alt"),
+            "eph": tpv.get("eph")
         }
         if current_weather:
             cache["weather"] = current_weather
@@ -248,7 +259,11 @@ def main():
                 "timestamp": now.isoformat(),
                 "lat": lat,
                 "lon": lon,
-                "address": address
+                "address": address,
+                "speed": tpv.get("speed"),
+                "track": tpv.get("track"),
+                "alt": tpv.get("alt"),
+                "eph": tpv.get("eph")
             }
             history = load_history()
             history.append((now, entry))

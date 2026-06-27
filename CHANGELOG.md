@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.5] - 2026-06-27
+
+### Added
+- **gpsloc `--tpv` flag** — Outputs raw TPV JSON from gpsd as a single line (for programmatic consumers like location-updater). Existing flags (`--latlon`, `--human`, `--lat`, `--lon`, default JSON) unchanged.
+- **Speed, heading, altitude, accuracy in location cache and history** — `location.json` and `location-history.jsonl` now include `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) alongside the existing lat/lon/address/timestamp fields. Enables distinguishing driving from walking, detecting brief stops vs. destinations, and richer location reports.
+- **gpsloc `--human` now shows heading and accuracy** — Previously only showed lat/lon/alt/speed/fix.
+
+### Changed
+- **location-updater uses `gpsloc --tpv` instead of `gpsloc --latlon`** — Gets full TPV data in one call instead of just coordinates. New `get_tpv()` function replaces `get_latlon()`.
+- **location-updater filters out 0,0 coordinates** — Skips null-island pings (phone GPS without satellite fix) instead of recording them as valid entries.
+- **location-updater history window extended to 48h** — Was 24h, now matches the `location-prune` cron interval for consistency.
+
+### Fixed
+- **Duplicate entries in JSONL** — location-updater was writing each entry twice per cycle (once from the cache write path, once from the history write path). Now writes once.
+
 ## [1.0.4] - 2026-06-25
 
 ### Fixed

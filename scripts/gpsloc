@@ -3,11 +3,12 @@
 gpsloc - Read current GPS coordinates from a local gpsd daemon.
 
 Usage:
-    gpsloc              # Print lat/lon/alt/speed as JSON
+    gpsloc              # Print lat/lon/alt/speed as JSON (default)
     gpsloc --human      # Print human-readable location
     gpsloc --lat        # Print latitude only
     gpsloc --lon        # Print longitude only
     gpsloc --latlon     # Print "lat,lon" (for maps URLs, etc.)
+    gpsloc --tpv        # Print full TPV JSON from gpsd (for scripts)
 
 Requires: gpsd running on localhost:2947
 """
@@ -98,20 +99,27 @@ def main():
         print(data.get("lon", ""))
     elif "--latlon" in args:
         print(f"{data.get('lat','')},{data.get('lon','')}")
+    elif "--tpv" in args:
+        # Raw TPV JSON for programmatic consumers (location-updater, etc.)
+        print(json.dumps(data))
     elif "--human" in args:
         lat = data.get("lat", "?")
         lon = data.get("lon", "?")
         alt = data.get("alt", "?")
         speed = data.get("speed", "?")
+        track = data.get("track", "?")
         mode = data.get("mode", 0)
+        eph = data.get("eph", "?")
         mode_str = {0: "no fix", 1: "no fix", 2: "2D", 3: "3D"}.get(mode, "?")
         print(f"Latitude:  {lat}")
         print(f"Longitude: {lon}")
         print(f"Altitude:  {alt} m")
         print(f"Speed:     {speed} m/s")
+        print(f"Heading:   {track}°")
+        print(f"Accuracy:  {eph} m")
         print(f"Fix:       {mode_str}")
     else:
-        # Default: output full JSON
+        # Default: output full JSON (pretty-printed for humans)
         print(json.dumps(data, indent=2))
 
 
