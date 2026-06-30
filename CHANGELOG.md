@@ -2,18 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.0.5] - 2026-06-27
-
-### Added
-- **gpsloc `--tpv` flag** — Outputs raw TPV JSON from gpsd as a single line (for programmatic consumers like location-updater). Existing flags (`--latlon`, `--human`, `--lat`, `--lon`, default JSON) unchanged.
-- **Speed, heading, altitude, accuracy in location cache and history** — `location.json` and `location-history.jsonl` now include `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) alongside the existing lat/lon/address/timestamp fields. Enables distinguishing driving from walking, detecting brief stops vs. destinations, and richer location reports.
-- **gpsloc `--human` now shows heading and accuracy** — Previously only showed lat/lon/alt/speed/fix.
-
-### Changed
-- **location-updater uses `gpsloc --tpv` instead of `gpsloc --latlon`** — Gets full TPV data in one call instead of just coordinates. New `get_tpv()` function replaces `get_latlon()`.
-- **location-updater filters out 0,0 coordinates** — Skips null-island pings (phone GPS without satellite fix) instead of recording them as valid entries.
-- **location-updater history window extended to 48h** — Was 24h, now matches the `location-prune` cron interval for consistency.
-
 ## [1.0.6] - 2026-06-30
 
 ### Added
@@ -27,6 +15,18 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **gpsd-watcher stale connection** — After running for multiple days, the watcher's persistent TCP connection to gpsd could silently stop receiving fresh TPV data, causing the TPV cache to return 0,0 coordinates (null island) while the phone was still transmitting correctly. Root cause unclear (possibly gpsd internal client management, TCP zombie state, or phone battery optimization causing gpsd to emit 0,0 pings that the watcher cached and never refreshed). Fixed by: (1) auto-reconnect when no valid TPV for >11 min, (2) daily restart timer at 4 AM, (3) diagnostic logging to detect recurrence.
 - **gpsd-watcher overwrites cache with 0,0** — The watcher wrote null-island (0,0) TPV reports to `/tmp/gpsd-last-tpv.json`, overwriting the last known good position. This caused `gpsloc` and `location-updater` to report 0,0 instead of the last valid location during gaps between phone transmissions. Now the watcher only updates the cache when it receives a valid (non-0,0) TPV, preserving the last good position until fresh data arrives.
+
+## [1.0.5] - 2026-06-27
+
+### Added
+- **gpsloc `--tpv` flag** — Outputs raw TPV JSON from gpsd as a single line (for programmatic consumers like location-updater). Existing flags (`--latlon`, `--human`, `--lat`, `--lon`, default JSON) unchanged.
+- **Speed, heading, altitude, accuracy in location cache and history** — `location.json` and `location-history.jsonl` now include `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) alongside the existing lat/lon/address/timestamp fields. Enables distinguishing driving from walking, detecting brief stops vs. destinations, and richer location reports.
+- **gpsloc `--human` now shows heading and accuracy** — Previously only showed lat/lon/alt/speed/fix.
+
+### Changed
+- **location-updater uses `gpsloc --tpv` instead of `gpsloc --latlon`** — Gets full TPV data in one call instead of just coordinates. New `get_tpv()` function replaces `get_latlon()`.
+- **location-updater filters out 0,0 coordinates** — Skips null-island pings (phone GPS without satellite fix) instead of recording them as valid entries.
+- **location-updater history window extended to 48h** — Was 24h, now matches the `location-prune` cron interval for consistency.
 
 ## [1.0.4] - 2026-06-25
 
