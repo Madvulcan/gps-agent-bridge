@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart gpsd-watcher daily to prevent stale TCP connections
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart gpsd-watcher.service

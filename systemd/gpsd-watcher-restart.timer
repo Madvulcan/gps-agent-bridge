@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily restart of gpsd-watcher to prevent stale connections
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+AccuracySec=300
+
+[Install]
+WantedBy=timers.target

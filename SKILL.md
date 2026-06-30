@@ -114,7 +114,9 @@ Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/loca
 | Service/Job | Schedule | Purpose |
 |-------------|----------|---------|
 | `gpsd.service` | Running | Receives UDP NMEA on 2948, serves JSON on TCP 2947 |
-| `location-updater.service` | Running | Reads gpsd every 30s, writes cache + history |
+| `gpsd-watcher.service` | Running | Persistent gpsd subscriber — caches latest TPV to `/tmp/gpsd-last-tpv.json`. **Required** for `gpsloc` to work with GPS AgentBridge's intermittent transmissions. Without it, `gpsloc` times out because gpsd only emits TPV when fresh NMEA arrives and a subscriber is active. |
+| `gpsd-watcher.service` | Running | Persistent gpsd subscriber — caches latest TPV to `/tmp/gpsd-last-tpv.json`. **Required** for `gpsloc` to work with GPS AgentBridge's intermittent transmissions. Without it, `gpsloc` times out because gpsd only emits TPV when a subscriber is active and fresh NMEA arrives. Includes diagnostic logging and automatic stale-connection detection (reconnects if no valid TPV for >11 min). Restarted daily at 4 AM via `gpsd-watcher-restart.timer` to prevent long-running connections from going silent. See `references/gpsd-watcher-service.md` |
+| `location-updater.service` | Running | Reads gpsd every 30s, writes cache + history (includes speed/track/alt/eph) |
 | `location-landmark` | Every 5 min | Detect places user stays >5 min |
 | `location-compact` | Daily 3:15 AM | Compact raw history into tiers |
 | `location-prune` | Every 2 hours | Prune raw JSONL to 48h |
@@ -180,18 +182,16 @@ Users can ask you to remember places they like, want to avoid, or want to note f
 **Flow:**
 1. **Read current location** from `~/.hermes/location.json`
 2. **Reverse geocode** to get the address (via Nominatim)
-3. **Save immediately** — don't wait for more info. Use the `places.py` script:
+3. **Save immediately** — don't wait for more info. Use the `places` CLI:
    ```bash
-   python3 ~/.hermes/scripts/places.py add \
-     --name "Place Name" --lat LAT --lon LON \
-     --address "Full Address" \
-     --notes "User's reason for saving"
+   places add --name "Place Name" --lat LAT --lon LON --address "Full Address" --notes "User's reason for saving" --tags tag1 tag2
    ```
+   Note: the command is `places` (installed at `/usr/local/bin/places`), NOT `places.py`.
 4. **Confirm to the user** — "✅ I've saved this location: [name/address]"
 5. **Ask a polite follow-up** — "Do you want to add any notes or thoughts about this place?"
 6. **If they provide notes**, update the entry:
    ```bash
-   python3 ~/.hermes/scripts/places.py update --id ID --notes "Additional notes"
+   places update --id ID --notes "Additional notes"
    ```
 
 **Auto-extract tags** from the user's description:
@@ -213,9 +213,9 @@ Users can ask you to remember places they like, want to avoid, or want to note f
 **Flow:**
 1. **Try structured search first:**
    ```bash
-   python3 ~/.hermes/scripts/places.py search --query "restaurant milwaukee"
-   python3 ~/.hermes/scripts/places.py search --tags liked --near-lat LAT --near-lon LON --radius 50000
-   python3 ~/.hermes/scripts/places.py list
+   places search --query "restaurant milwaukee"
+   places search --tags liked --near-lat LAT --near-lon LON --radius 50000
+   places list
    ```
 2. **If structured search returns results**, present them.
 3. **If structured search returns nothing**, load the entire `places.json` file into your context and do a manual search:
@@ -243,6 +243,8 @@ Places are stored in `~/.hermes/places.json` — a simple JSON file. This is sep
 
 ## Presentation Format
 
+- **Timezone: Always report timestamps in the local timezone of where the user was at the time.** Convert each location history entry to its own local TZ (e.g. Knoxville → America/New_York/EST/EDT, Texas → America/Chicago/CST/CDT). If a single report spans multiple timezones, convert each entry individually. Never present UTC timestamps in user-facing location history — always convert first.
+- **Speed data: when available, use it to add context.** Speed >2 m/s suggests driving; 0.8–2 m/s suggests walking; 0 m/s with no recent movement means stopped/parked. Mention this in natural language ("you were driving" / "you walked to") rather than raw numbers, unless the user asks for specifics. A brief stop at a business while driving (e.g., waiting to turn) should not be reported as "visited" — use speed + dwell time to distinguish stops from pauses.
 - **List format** with explicit 📍 and 🧭 links — never tables or code blocks
 - **Sort by distance** from user's current location
 - **Group by distance tier** (walkable / short drive / further out)
@@ -266,7 +268,11 @@ No API key needed. Works on mobile (opens Maps app) and desktop. **Never wrap in
 - **Response time creep**: If >2 minutes, something went wrong.
 - **Nominatim rate limits**: The system uses a local SQLite geocoding cache (`~/.hermes/geocode-cache.db`) to avoid hitting OSM's rate limits. If the user moves less than 50m, the cached address is reused.
 - **Weather data**: Fetched from Open-Meteo (free, no API key) every 10 minutes and cached in `location.json`. May be slightly stale.
-- **GPS unavailable**: When `status` is `"unavailable"`, this may be **normal deep sleep behavior** (phone stationary + screen off >5min → GPS off, motion sensor armed). Only treat as a problem if the user is actively using the phone. In that case, the streaming service may have been killed (e.g., after APK update) — ask user to open app and tap START. Fall back to `DEFAULT_CITY` config value or ask the user. Can still report cached weather but note it may be stale.
+- **GPS status "unavailable" — diagnostic decision tree:**
+  1. Check `cat /tmp/gpsd-last-tpv.json` — if it shows `lat: 0.0, lon: 0.0` and the cache is being updated recently, **the gpsd-watcher connection is stale**. Restart it: `sudo systemctl restart gpsd-watcher.service`. Then also restart location-updater: `sudo systemctl restart location-updater.service`.
+  2. If the TPV cache is stale (not updating at all), check `sudo tcpdump -i any udp port 2948 -c 1` with a 20s timeout. If no packets arrive, the phone isn't sending — ask user to verify the app destination server config.
+  3. If packets arrive but coords are 0,0, the phone's GPS hasn't acquired a satellite fix yet — normal after deep sleep or coming indoors.
+  4. **Don't blame the phone first.** The most common cause of "unavailable" in practice is the watcher going stale, not the phone stopping.
 - **Transmission interval**: For GPS AgentBridge users, this is handled automatically (distance-based + adaptive polling). For gpsdRelay / other fixed-interval apps, default ~1s drains battery in ~2h. Recommend 60s (good balance) or 5-10 min (maximum battery).
 
 ## Advanced Features
@@ -304,6 +310,11 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 - gmaps script: ~30s per query
 - gpsnear-parallel: ~43s single query, ~68s for 3 queries
 
+**Data quirks when reading historical JSONL:**
+- **Pre-v1.0.5 entries are duplicated** — The old location-updater wrote each entry twice per cycle (cache write + history write). When reading old JSONL, deduplicate by timestamp before presenting to the user.
+- **Pre-v1.0.5 entries lack speed/track/alt/eph** — These fields were added in v1.0.5. Older entries only have timestamp/lat/lon/address. Code that reads JSONL should handle both shapes.
+- **Pre-v1.0.5 entries may contain 0,0 coordinates** — Null-island pings (phone GPS without satellite fix) were recorded as valid entries before v1.0.5 added filtering. Skip any entries with lat=0.0 and lon=0.0 when presenting history.
+
 **Anti-patterns to avoid:**
 - Cascading through multiple fallback layers
 - Using code blocks for output (kills Markdown link rendering)
@@ -325,6 +336,17 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 | Notification not appearing (Android 13+) | The `POST_NOTIFICATIONS` runtime permission must be granted. Without it, the foreground service notification is silently blocked. The v1.3.1+ onboarding requests this permission. On older versions: go to Android Settings → Apps → GPS AgentBridge → Notifications → enable. |
 | location-updater writing to /root/ | Service missing `Environment=HOME=` — run `./install.sh` to re-template the service files, or check that `/usr/lib/systemd/system/location-updater.service` has `Environment=HOME=/home/USER` |
 | gpsd-watcher writing to /root/ | Same fix as location-updater — `Environment=HOME=` in the service file |
+| gpsd-watcher stale connection | If the watcher has been running for days, its TCP connection to gpsd may silently stop receiving fresh TPV data (writes 0,0 coordinates instead of real ones). **Fix:** `systemctl restart gpsd-watcher`. Prevented by daily restart timer (`gpsd-watcher-restart.timer` at 4 AM). Check logs: `journalctl -u gpsd-watcher --since "1h ago"` |
+| gpsd-watcher feeds stale 0,0 data | The watcher keeps a single persistent TCP connection to gpsd. After running for days, that connection can go stale — the watcher still writes to the TPV cache, but with old or null-island (0,0) coordinates instead of real ones. `location-updater` then correctly filters these out (v1.0.5+), but `location.json` shows `status: unavailable`. **Fix: restart gpsd-watcher** (`sudo systemctl restart gpsd-watcher.service`). **Diagnostic:** if the phone app says it has a fix and is streaming, but `tcpdump udp port 2948` shows no packets arriving, first check the TPV cache age and coordinates (`cat /tmp/gpsd-last-tpv.json`). If the cache is being updated with 0,0 data, the watcher connection is stale — restarting it is the fix. Don't waste time troubleshooting the phone if the watcher is the problem. |
+| Duplicate entries in JSONL | When location-updater restarts, `last_lat`/`last_lon` reset to None, so the first cycle always writes an entry — even at the same position as the last entry before restart. This produces near-duplicate entries (sub-second apart, same coords). Not a data problem — deduplicate when presenting reports. A real fix would seed `last_lat`/`last_lon` from the JSONL on startup, but the duplicates are cosmetic and don't affect storage or queries. |
+| GPS streaming dies overnight (10+ hour gap) | **Two-layer fix required:** (1) systemd `User=` or `Environment=HOME=` (see Pitfalls), AND (2) Android OEM battery setting — go to Settings → Apps → GPS AgentBridge → Battery → select **"Unrestricted"** (not "Smart Mode"). The system-level `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is NOT sufficient on its own — OEM-specific "Smart Mode" throttles background activity independently. |
 | places command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |
 | gpsd won't start (SHM error) | Shared memory conflict. Run: `sudo bash -c 'killall -9 gpsd; rm -f /run/gpsd.sock; for key in $(ipcs -m | grep root | awk "{print \$2}"); do ipcrm -m \$key 2>/dev/null; done; systemctl start gpsd.service'` |
 | gpsd starts then exits | Ensure `-N` flag is present in systemd service (gpsd forks to background). Without `-N`, gpsd stays in foreground and systemd considers it "exited". |
+
+## Pitfalls
+
+- **The `places` CLI is installed at `/usr/local/bin/places`**, not `~/.hermes/scripts/places.py`. Always use `places` directly.
+- **`location-updater.service` must include `User=<username>`** (or `Environment=HOME=/home/<user>`). Without it, the service runs as root and `~/.hermes/` resolves to `/root/.hermes/` — data gets written but the agent reads from the wrong path and always sees `status: unavailable`. The `gpsd-watcher.service` is immune because it writes to `/tmp/`, not `~/.hermes/`.
+- **Android OEM battery optimization kills GPS streaming** — Even with `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` granted, the per-app OEM "Smart Mode" setting (Settings → Apps → GPS AgentBridge → Battery) can throttle the streaming service. If GPS data shows large overnight gaps (10+ hours) despite correct systemd config, check this setting and switch to "Unrestricted."
+- **GPS AgentBridge's distance-based transmission means long quiet periods** when stationary. If the user says "check again" or "I just sent a test", don't assume the data is missing — the TPV cache at `/tmp/gpsd-last-tpv.json` may have updated but `location.json` won't refresh until the next 30s updater cycle. Wait a few seconds and re-read.

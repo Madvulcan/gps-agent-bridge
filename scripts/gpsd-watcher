@@ -1,55 +1,158 @@
 #!/usr/bin/env python3
-"""Persistent gpsd watcher - keeps a subscription alive and caches the latest TPV."""
-import json, socket, os, sys
+"""
+gpsd-watcher - Persistent gpsd subscriber that caches the latest TPV.
+
+Keeps a TCP connection to gpsd alive and writes every TPV report to
+/tmp/gpsd-last-tpv.json. This makes gpsloc and location-updater instant
+instead of waiting for the next phone transmission.
+
+Features:
+  - Diagnostic logging to systemd journal (connection events, TPV stats,
+    stale-data detection)
+  - Automatic reconnection on socket errors or stale data
+  - Tracks time since last valid TPV and warns if data is stale
+"""
+import json
+import socket
+import os
+import sys
+import time
+from datetime import datetime, timezone
 
 GPSD_HOST = "127.0.0.1"
 GPSD_PORT = 2947
 CACHE_FILE = "/tmp/gpsd-last-tpv.json"
+RECV_TIMEOUT = 30          # seconds - socket recv timeout
+STALE_THRESHOLD = 700      # seconds - consider data stale if no valid TPV for this long (covers 10-min max interval + margin)
+RECONNECT_DELAY = 10       # seconds - wait before reconnecting after error
+LOG_INTERVAL = 600         # seconds - log periodic status (every 10 min)
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.settimeout(30)
-sock.connect((GPSD_HOST, GPSD_PORT))
-sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
 
-buf = b""
-while True:
-    try:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
-        while b"\n" in buf:
-            line, buf = buf.split(b"\n", 1)
-            line = line.strip()
-            if not line or not line.startswith(b"{"):
-                continue
-            try:
-                d = json.loads(line.decode())
-                if d.get("class") == "TPV" and d.get("mode", 0) >= 2:
-                    with open(CACHE_FILE, "w") as f:
-                        json.dump(d, f)
-                    # Also update location.json if it exists
-                    loc_path = os.path.expanduser("~/.hermes/location.json")
-                    lat = d.get("lat")
-                    lon = d.get("lon")
-                    if lat and lon:
-                        cache = {
-                            "status": "active",
-                            "timestamp": d.get("time", ""),
-                            "lat": lat,
-                            "lon": lon,
-                            "alt": d.get("alt"),
-                            "speed": d.get("speed"),
-                            "mode": d.get("mode"),
-                        }
-                        with open(loc_path, "w") as f:
-                            json.dump(cache, f, indent=2)
-            except (json.JSONDecodeError, KeyError):
-                pass
-    except socket.timeout:
-        continue
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        break
+def log(msg):
+    """Print to stderr for systemd journal capture."""
+    print(f"[gpsd-watcher] {msg}", flush=True)
 
-sock.close()
+
+def write_cache(tpv_data):
+    """Write TPV to cache file."""
+    with open(CACHE_FILE, "w") as f:
+        json.dump(tpv_data, f)
+
+
+def connect_and_watch():
+    """Connect to gpsd and watch for TPV reports. Returns on disconnect/error."""
+    log(f"Connecting to gpsd at {GPSD_HOST}:{GPSD_PORT}")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(RECV_TIMEOUT)
+    sock.connect((GPSD_HOST, GPSD_PORT))
+
+    # Request JSON watch mode
+    sock.sendall(b'?WATCH={"enable":true,"json":true}\n')
+    log("Connected, WATCH sent")
+
+    # Track diagnostics
+    last_valid_tpv_time = time.time()
+    last_log_time = time.time()
+    tpv_count = 0
+    null_island_count = 0
+    valid_count = 0
+    connected_at = time.time()
+
+    buf = b""
+    while True:
+        try:
+            chunk = sock.recv(4096)
+            if not chunk:
+                log("Connection closed by gpsd (empty recv)")
+                break
+            buf += chunk
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if not line or not line.startswith(b"{"):
+                    continue
+                try:
+                    d = json.loads(line.decode())
+                    if d.get("class") != "TPV" or d.get("mode", 0) < 2:
+                        continue
+
+                    tpv_count += 1
+                    lat = d.get("lat", 0.0)
+                    lon = d.get("lon", 0.0)
+
+                    # Detect null-island (0,0) — phone GPS without satellite fix
+                    if lat == 0.0 and lon == 0.0:
+                        null_island_count += 1
+                        # Still write to cache so gpsloc knows data is flowing
+                        write_cache(d)
+                        continue
+
+                    # Valid TPV with real coordinates
+                    valid_count += 1
+                    last_valid_tpv_time = time.time()
+                    write_cache(d)
+
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+            # Periodic status logging
+            now = time.time()
+            if now - last_log_time >= LOG_INTERVAL:
+                elapsed = now - connected_at
+                stale_secs = now - last_valid_tpv_time
+                log(
+                    f"Status: uptime={elapsed:.0f}s, tpv_total={tpv_count}, "
+                    f"valid={valid_count}, null_island={null_island_count}, "
+                    f"last_valid_ago={stale_secs:.0f}s"
+                )
+                if stale_secs > STALE_THRESHOLD:
+                    log(
+                        f"WARNING: No valid TPV for {stale_secs:.0f}s "
+                        f"(threshold={STALE_THRESHOLD}s). Connection may be stale."
+                    )
+                last_log_time = now
+
+        except socket.timeout:
+            # No data received this interval — check if data is stale
+            stale_secs = time.time() - last_valid_tpv_time
+            if stale_secs > STALE_THRESHOLD:
+                log(
+                    f"Stale data detected: no valid TPV for {stale_secs:.0f}s. "
+                    f"Reconnecting to gpsd."
+                )
+                sock.close()
+                return  # Reconnect in outer loop
+            continue
+
+        except ConnectionResetError:
+            log("Connection reset by gpsd")
+            sock.close()
+            return
+
+        except OSError as e:
+            log(f"Socket error: {e}")
+            sock.close()
+            return
+
+        except Exception as e:
+            log(f"Unexpected error: {e}")
+            sock.close()
+            return
+
+    sock.close()
+
+
+def main():
+    log("Starting gpsd-watcher")
+    while True:
+        try:
+            connect_and_watch()
+        except Exception as e:
+            log(f"Connection failed: {e}")
+
+        log(f"Reconnecting in {RECONNECT_DELAY}s...")
+        time.sleep(RECONNECT_DELAY)
+
+
+if __name__ == "__main__":
+    main()
