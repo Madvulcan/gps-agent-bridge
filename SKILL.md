@@ -103,11 +103,13 @@ location-query --recent 2h
 
 ## Location Cache
 
-The hot cache at `~/.hermes/location.json` is updated every 30 seconds. Check `status` field — if `"unavailable"`, the GPS stream is down. The cache also includes `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) — useful for distinguishing driving from walking, detecting brief stops vs. true destinations.
+The hot cache at `~/.hermes/location.json` is updated every 30 seconds. Check `status` field — if `"unavailable"`, the GPS stream is down. The cache also includes `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) — useful for distinguishing driving from walking, detecting brief stops vs. true destinations. See "Interpreting Speed/Track Data" in Advanced Features for guidance on speed ranges and caveats.
 
 ## Location History (Tiered)
 
 Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/location-history.jsonl` are pruned to 48h rolling window. Total storage: ~3-3.5MB/year. History entries include `speed`, `track`, `alt`, and `eph` alongside coordinates and address.
+
+**Deduplication note:** The JSONL may contain duplicate entries (same coordinates, sub-second apart) caused by service restarts. These are harmless — deduplicate when presenting to the user by matching on timestamp (to the second) + coordinates. The `location-compact` cron job handles this correctly when aggregating into tiers.
 
 ## Services & Cron Jobs
 
@@ -120,6 +122,7 @@ Stored in `~/.hermes/location-history.db` (SQLite). Raw pings in `~/.hermes/loca
 | `location-landmark` | Every 5 min | Detect places user stays >5 min |
 | `location-compact` | Daily 3:15 AM | Compact raw history into tiers |
 | `location-prune` | Every 2 hours | Prune raw JSONL to 48h |
+| `gpsd-watcher-restart.timer` | Daily 4:00 AM | Restart gpsd-watcher to prevent stale TCP connections |
 
 ## Important Rules
 
@@ -250,6 +253,7 @@ Places are stored in `~/.hermes/places.json` — a simple JSON file. This is sep
 - **Group by distance tier** (walkable / short drive / further out)
 - **Include rating** when available
 - **Keep concise** — don't list every result if there are many
+- **Trip interpretation** — The phone app uses a 500m distance threshold before sending the first movement ping. This means every trip has a "blind spot" between departure and the first recorded position. When presenting trip timelines, infer trip start as a window ("departed between X and Y") rather than a point ("departed at Y"), where X is the last stationary ping and Y is the first movement ping. Never state the first movement ping as the departure time — the user had already been traveling for some distance by then.
 
 ## Google Maps Link Formats
 
@@ -303,6 +307,17 @@ This requires user configuration — the system provides the location detection;
 ### Reverse-Geocoding Cache
 A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. When the user moves less than 50m from a previously geocoded location, the cached address is reused instead of making another API call. This prevents rate limiting during frequent movement.
 
+### Interpreting Speed/Track Data
+The `speed` and `track` fields in `location.json` and history entries enable richer location reports:
+- **speed ≈ 0 m/s + stationary**: User is at a destination (home, store, restaurant)
+- **speed 0.5–2 m/s**: Walking pace (1–4.5 mph) — user is on foot
+- **speed 3–15 m/s**: Driving (7–34 mph) — likely on city streets
+- **speed 15–30+ m/s**: Highway driving
+- **Brief stop with speed=0 between moving segments**: Traffic light, left turn, not a destination. Cross-reference with duration — if speed=0 for <2 minutes between movement, it's a pause, not a stop.
+- **track field**: Heading in degrees (0=N, 90=E, 180=S, 270=W). Useful for direction of travel.
+
+**Caveat**: Speed data is only as reliable as the GPS fix. `eph` (accuracy) >50m often means the speed reading is noisy. Take speed values with a grain of salt when accuracy is poor.
+
 ## Optimization Notes
 
 **Timing benchmarks:**
@@ -336,13 +351,15 @@ A local SQLite cache (`~/.hermes/geocode-cache.db`) stores Nominatim results. Wh
 | Notification not appearing (Android 13+) | The `POST_NOTIFICATIONS` runtime permission must be granted. Without it, the foreground service notification is silently blocked. The v1.3.1+ onboarding requests this permission. On older versions: go to Android Settings → Apps → GPS AgentBridge → Notifications → enable. |
 | location-updater writing to /root/ | Service missing `Environment=HOME=` — run `./install.sh` to re-template the service files, or check that `/usr/lib/systemd/system/location-updater.service` has `Environment=HOME=/home/USER` |
 | gpsd-watcher writing to /root/ | Same fix as location-updater — `Environment=HOME=` in the service file |
-| gpsd-watcher stale connection | If the watcher has been running for days, its TCP connection to gpsd may silently stop receiving fresh TPV data (writes 0,0 coordinates instead of real ones). **Fix:** `systemctl restart gpsd-watcher`. Prevented by daily restart timer (`gpsd-watcher-restart.timer` at 4 AM). Check logs: `journalctl -u gpsd-watcher --since "1h ago"` |
+| gpsd-watcher stale connection | If the watcher has been running for days, its TCP connection to gpsd may silently stop receiving fresh TPV data (no new writes to cache, cache goes stale). **Fix:** `systemctl restart gpsd-watcher`. Prevented by daily restart timer (`gpsd-watcher-restart.timer` at 4 AM) and auto-reconnect when no valid TPV for >11 min. Check logs: `journalctl -u gpsd-watcher --since "1h ago"` |
+| gpsloc shows 0,0 but phone has a fix | The watcher may have written a null-island (0,0) TPV to `/tmp/gpsd-last-tpv.json`, overwriting the last valid position. As of v1.0.6 the watcher skips 0,0 writes, but older versions or stale cache files may still have this. **Fix:** (1) Update gpsd-watcher to v1.0.6+, (2) Seed the cache: read the last valid entry from `location-history.jsonl` and write it to `/tmp/gpsd-last-tpv.json` as a TPV-shaped JSON object. The cache will then hold until the next valid transmission. |
 | gpsd-watcher feeds stale 0,0 data | The watcher keeps a single persistent TCP connection to gpsd. After running for days, that connection can go stale — the watcher still writes to the TPV cache, but with old or null-island (0,0) coordinates instead of real ones. `location-updater` then correctly filters these out (v1.0.5+), but `location.json` shows `status: unavailable`. **Fix: restart gpsd-watcher** (`sudo systemctl restart gpsd-watcher.service`). **Diagnostic:** if the phone app says it has a fix and is streaming, but `tcpdump udp port 2948` shows no packets arriving, first check the TPV cache age and coordinates (`cat /tmp/gpsd-last-tpv.json`). If the cache is being updated with 0,0 data, the watcher connection is stale — restarting it is the fix. Don't waste time troubleshooting the phone if the watcher is the problem. |
 | Duplicate entries in JSONL | When location-updater restarts, `last_lat`/`last_lon` reset to None, so the first cycle always writes an entry — even at the same position as the last entry before restart. This produces near-duplicate entries (sub-second apart, same coords). Not a data problem — deduplicate when presenting reports. A real fix would seed `last_lat`/`last_lon` from the JSONL on startup, but the duplicates are cosmetic and don't affect storage or queries. |
 | GPS streaming dies overnight (10+ hour gap) | **Two-layer fix required:** (1) systemd `User=` or `Environment=HOME=` (see Pitfalls), AND (2) Android OEM battery setting — go to Settings → Apps → GPS AgentBridge → Battery → select **"Unrestricted"** (not "Smart Mode"). The system-level `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is NOT sufficient on its own — OEM-specific "Smart Mode" throttles background activity independently. |
 | places command not found | Run `places list` instead of `places.py list` — the .py extension is stripped on install |
 | gpsd won't start (SHM error) | Shared memory conflict. Run: `sudo bash -c 'killall -9 gpsd; rm -f /run/gpsd.sock; for key in $(ipcs -m | grep root | awk "{print \$2}"); do ipcrm -m \$key 2>/dev/null; done; systemctl start gpsd.service'` |
 | gpsd starts then exits | Ensure `-N` flag is present in systemd service (gpsd forks to background). Without `-N`, gpsd stays in foreground and systemd considers it "exited". |
+| gpsd-watcher stale connection (full diagnostic) | See `references/gpsd-watcher-stale-connection.md` for symptoms, diagnostic procedure, manual recovery, and the location-updater user-path pitfall |
 
 ## Pitfalls
 
