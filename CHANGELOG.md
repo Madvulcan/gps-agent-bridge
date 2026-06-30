@@ -8,14 +8,20 @@ All notable changes to this project will be documented in this file.
 - **gpsloc `--tpv` flag** — Outputs raw TPV JSON from gpsd as a single line (for programmatic consumers like location-updater). Existing flags (`--latlon`, `--human`, `--lat`, `--lon`, default JSON) unchanged.
 - **Speed, heading, altitude, accuracy in location cache and history** — `location.json` and `location-history.jsonl` now include `speed` (m/s), `track` (heading in degrees), `alt` (altitude in meters), and `eph` (horizontal accuracy in meters) alongside the existing lat/lon/address/timestamp fields. Enables distinguishing driving from walking, detecting brief stops vs. destinations, and richer location reports.
 - **gpsloc `--human` now shows heading and accuracy** — Previously only showed lat/lon/alt/speed/fix.
-- **gpsd-watcher diagnostic logging** — The watcher now logs structured messages to the systemd journal: startup/shutdown events, connection status (`[gpsd-watcher] Connected, WATCH sent`), periodic status every 10 minutes (uptime, valid TPV count, null-island count, seconds since last valid TPV), and stale-data warnings. Check logs with `journalctl -u gpsd-watcher --since "1h ago"`.
-- **gpsd-watcher auto-reconnect** — If no valid (non-0,0) TPV is received for >11 minutes (STALE_THRESHOLD), the watcher closes its TCP connection and reconnects with a fresh `?WATCH` subscription. Also reconnects on socket errors, connection resets, or empty recv. Waits 10s between reconnection attempts.
-- **gpsd-watcher daily restart timer** — `gpsd-watcher-restart.timer` fires at 4:00 AM daily, triggering `gpsd-watcher-restart.service` (oneshot) which restarts the watcher. Prevents long-running TCP connections from silently going stale. Enabled and started automatically by install.sh.
 
 ### Changed
 - **location-updater uses `gpsloc --tpv` instead of `gpsloc --latlon`** — Gets full TPV data in one call instead of just coordinates. New `get_tpv()` function replaces `get_latlon()`.
 - **location-updater filters out 0,0 coordinates** — Skips null-island pings (phone GPS without satellite fix) instead of recording them as valid entries.
 - **location-updater history window extended to 48h** — Was 24h, now matches the `location-prune` cron interval for consistency.
+
+## [1.0.6] - 2026-06-30
+
+### Added
+- **gpsd-watcher diagnostic logging** — The watcher now logs structured messages to the systemd journal: startup/shutdown events, connection status (`[gpsd-watcher] Connected, WATCH sent`), periodic status every 10 minutes (uptime, valid TPV count, null-island count, seconds since last valid TPV), and stale-data warnings. Check logs with `journalctl -u gpsd-watcher --since "1h ago"`.
+- **gpsd-watcher auto-reconnect** — If no valid (non-0,0) TPV is received for >11 minutes (STALE_THRESHOLD), the watcher closes its TCP connection and reconnects with a fresh `?WATCH` subscription. Also reconnects on socket errors, connection resets, or empty recv. Waits 10s between reconnection attempts.
+- **gpsd-watcher daily restart timer** — `gpsd-watcher-restart.timer` fires at 4:00 AM daily, triggering `gpsd-watcher-restart.service` (oneshot) which restarts the watcher. Prevents long-running TCP connections from silently going stale. Enabled and started automatically by install.sh.
+
+### Changed
 - **gpsd-watcher rewritten with reconnection loop** — Original script had a single flat connection with no recovery; if the socket died or went stale, the process would exit and systemd would restart it (losing a few seconds of coverage). New version has an outer `while True` loop: `connect_and_watch()` runs until disconnection/stale/error, then sleeps and reconnects. No coverage gap.
 
 ### Fixed
