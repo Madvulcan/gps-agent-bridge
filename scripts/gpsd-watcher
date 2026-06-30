@@ -81,10 +81,9 @@ def connect_and_watch():
                     lon = d.get("lon", 0.0)
 
                     # Detect null-island (0,0) — phone GPS without satellite fix
+                    # Don't overwrite the cache with 0,0; keep the last valid position
                     if lat == 0.0 and lon == 0.0:
                         null_island_count += 1
-                        # Still write to cache so gpsloc knows data is flowing
-                        write_cache(d)
                         continue
 
                     # Valid TPV with real coordinates

@@ -26,6 +26,7 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **gpsd-watcher stale connection** — After running for multiple days, the watcher's persistent TCP connection to gpsd could silently stop receiving fresh TPV data, causing the TPV cache to return 0,0 coordinates (null island) while the phone was still transmitting correctly. Root cause unclear (possibly gpsd internal client management, TCP zombie state, or phone battery optimization causing gpsd to emit 0,0 pings that the watcher cached and never refreshed). Fixed by: (1) auto-reconnect when no valid TPV for >11 min, (2) daily restart timer at 4 AM, (3) diagnostic logging to detect recurrence.
+- **gpsd-watcher overwrites cache with 0,0** — The watcher wrote null-island (0,0) TPV reports to `/tmp/gpsd-last-tpv.json`, overwriting the last known good position. This caused `gpsloc` and `location-updater` to report 0,0 instead of the last valid location during gaps between phone transmissions. Now the watcher only updates the cache when it receives a valid (non-0,0) TPV, preserving the last good position until fresh data arrives.
 
 ## [1.0.4] - 2026-06-25
 
