@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.7] - 2026-07-01
+
+### Changed
+- **SKILL.md updated for GPS AgentBridge v1.4.0** — Added tracking level table (1–5, Minimal 15min through Maximum 1min, default Balanced 5min), level-aware presentation guidance (at sparse levels, don't attempt detailed route reconstruction), and updated default distance threshold from 500m to 100m.
+- **Trip interpretation rules refined** — Departures are windows not points (between last stationary and first movement ping). Traffic light pauses (<3 min) don't split trips. Added to SKILL.md Presentation Format section.
+- **Timezone rule added** — Location history timestamps are always presented in the local timezone of where the user was at that time, converting each entry individually if a report spans multiple timezones.
+- **APKs updated to v1.4.0** — Both standard and fdroid release builds refreshed with new tracking level feature.
+
 ## [1.0.6] - 2026-06-30
 
 ### Added
