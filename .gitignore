@@ -26,10 +26,7 @@ Thumbs.db
 .vscode/
 .idea/
 gps-agent-bridge-android.zip
-gps-agent-bridge-debug.apk
+*.apk
 CONTEXT.md
 DELIVERY_README.md
 NOTES.md
-collab-conversation-log.md
-collaboration-log-coder-ai.md
-requirements-doc.md
