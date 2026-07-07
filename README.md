@@ -31,7 +31,7 @@ Instead of asking "Where are you?" or guessing based on old context, your agent 
 ```
 ┌─────────────────┐     UDP NMEA     ┌─────────────────┐     JSON      ┌──────────┐
 │  Smartphone      │ ──────────────► │  Linux Desktop   │ ──────────► │  Agent    │
-│  (GPS AgentBridge)│   port 2948    │  (gpsd daemon)   │   port 2947  │          │
+│  (GPS relay app) │   port 2948     │  (gpsd daemon)   │   port 2947  │  (you)    │
 └─────────────────┘                  └─────────────────┘              └──────────┘
 ```
 
@@ -45,8 +45,7 @@ The entire pipeline runs in the background. Once set up, your agent always knows
 
 | Platform | App | Protocol | Cost |
 |----------|-----|----------|------|
-| **Android (recommended)** | [GPS AgentBridge](https://github.com/Madvulcan/GPS-AgentBridge-Android) | UDP | Free |
-| **Android (alt)** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free |
+| **Android** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free |
 | **iOS (free)** | [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) | UDP | Free |
 | **iOS (alt)** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 |
 
@@ -56,7 +55,7 @@ Both apps push standard NMEA 0183 sentences to your desktop — the setup is ide
 
 - **Desktop:** Linux (Ubuntu, Debian, Mint, Arch, Fedora, etc.) or macOS (partial support, untested)
 - **Phone:** Android or iOS
-- **Network:** Both devices on the same network (Tailscale, Wireguard, or similar recommended)
+- **Network:** Both devices on the same network (LAN or Tailscale recommended)
 - **Python:** 3.10+ (stdlib only — no pip packages required for core functionality)
 - **Optional:** `invisible_playwright` for Google Maps scraping (requires separate install + Firefox fetch)
 
@@ -78,7 +77,7 @@ The goal: the user tells you "set up my phone as a GPS receiver," you read the a
 1. Clone this repo
 2. Run `./install.sh` (or `./install.sh --headless` for servers)
 3. Edit `config.json` to set your desktop's IP address
-4. Install the phone app (Android: [GPS AgentBridge](https://github.com/Madvulcan/GPS-AgentBridge-Android), iOS: NMEA Send Location)
+4. Install the phone app (Android: gpsdRelay, iOS: NMEA Send Location)
 5. Configure the app with your desktop's IP and port 2948
 6. Verify: `gpsloc --human`
 
@@ -142,7 +141,7 @@ Location data is stored in a tiered retention system:
 | Tier | Age | Granularity | Storage |
 |------|-----|-------------|---------|
 | Hot cache | Real-time | Latest ping | `~/.hermes/location.json` (30s refresh) |
-| Raw | 48 hours | Every 30s | `~/.hermes/location-history.jsonl` |
+| Raw | 48 hours (pruned by cron) | Every 30s (append-only) | `~/.hermes/location-history.jsonl` |
 | Tier 1 | 0–24h | 5-min averages | SQLite |
 | Tier 2 | 1–30 days | Hourly centroids | SQLite |
 | Tier 3 | 31d–1yr | 4-hour blocks | SQLite |

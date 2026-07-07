@@ -2,6 +2,10 @@
 """
 Prune raw location history to keep only the last 48 hours.
 The compacted tiers in SQLite hold everything older.
+
+This is the ONLY process that prunes location-history.jsonl.
+location-updater now appends only (no self-pruning), so this
+cron job must run reliably to prevent unbounded file growth.
 """
 import json, os
 from datetime import datetime, timezone, timedelta
@@ -14,6 +18,7 @@ if not os.path.exists(HISTORY_FILE):
 
 cutoff = datetime.now(timezone.utc) - timedelta(hours=KEEP_HOURS)
 kept = []
+pruned = 0
 with open(HISTORY_FILE, "r") as f:
     for line in f:
         line = line.strip()
@@ -24,9 +29,16 @@ with open(HISTORY_FILE, "r") as f:
             ts = datetime.fromisoformat(entry["timestamp"])
             if ts > cutoff:
                 kept.append(line)
+            else:
+                pruned += 1
         except (json.JSONDecodeError, KeyError):
             continue
 
 with open(HISTORY_FILE, "w") as f:
     for line in kept:
         f.write(line + "\n")
+
+if pruned > 0:
+    print(f"[prune] Removed {pruned} entries older than {KEEP_HOURS}h. Kept {len(kept)}.")
+else:
+    print(f"[prune] No entries to prune. Kept {len(kept)}.")
