@@ -33,5 +33,4 @@
 - `references/location-pipeline-failure-modes.md` — updated to reflect v1.0.8 fixes (compact 6×/day, append-only history, version drift resolved).
 - `README.md` — raw tier description updated to note "pruned by cron" and "append-only".
 
-**Bug fixes**:
-- Killed root orphan `location-updater` process (PID 3324996, running since Jun 30 with no supervision after the systemd service was killed Jul 1). Service now properly supervised and running as user `madvulcan`.
+
