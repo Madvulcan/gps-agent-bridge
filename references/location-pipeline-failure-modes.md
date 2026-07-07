@@ -2,7 +2,7 @@
 
 ## The two-writer architecture (and its failure states)
 
-`location-updater` runs as a systemd **user** service (managed by systemd, runs as `madvulcan`). Separately, a manually-started copy may be running (orphan). Both write to the same `~/.hermes/location-history.jsonl` and `location.json`.
+`location-updater` runs as a systemd **user** service (managed by systemd, runs as the installing user). Separately, a manually-started copy may be running (orphan). Both write to the same `~/.hermes/location-history.jsonl` and `location.json`.
 
 **Always check BOTH before acting:**
 
@@ -18,9 +18,9 @@ ps -eo pid,user,etime,cmd | grep [l]ocation-updater          # any process(es)
 | **inactive (dead)** | 1+ (orphan, often as **root**, PPID 1/init) | Service was killed (TERM) but an orphan is the SOLE writer. Data still flows but the supervised path is broken. | Kill the orphan, ensure `/usr/local/bin/location-updater` is the canonical (newer) version, then `systemctl --user restart location-updater`. |
 | inactive (dead) | none | No writer at all -> history frozen, cache stale | `systemctl --user restart location-updater` |
 
-**How this was discovered (2026-07-07):** `location-updater.service` showed `inactive (dead) since Wed 2026-07-01 22:02:58` (killed by TERM), yet a root-owned orphan (PID 3324996, started Jun 30, PPID 1/init) kept `location.json` and `location-history.jsonl` updating. Without checking both signals, you'd wrongly conclude GPS is "working normally."
+**Real-world example:** `location-updater.service` showed `inactive (dead)` (killed by TERM days prior), yet a root-owned orphan (PPID 1/init) kept `location.json` and `location-history.jsonl` updating. Without checking both signals, you'd wrongly conclude GPS is "working normally."
 
-**Ownership gotcha:** an orphan started as `root` still writes to `/home/madvulcan/.hermes/` (root can write there), so data files stay `madvulcan`-owned. Don't infer "service is healthy" from file ownership alone.
+**Ownership gotcha:** an orphan started as `root` still writes to the user's `~/.hermes/` (root can write there), so data files stay user-owned. Don't infer "service is healthy" from file ownership alone.
 
 ## Compact / DB sync fragility
 
@@ -49,7 +49,7 @@ ps -eo pid,user,etime,cmd | grep [l]ocation-updater
 kill <ORPHAN_PID>      # confirm service is dead first
 
 # 3. Ensure /usr/local/bin/location-updater is the newer canonical version
-diff /home/madvulcan/.hermes/scripts/location-updater /usr/local/bin/location-updater
+diff ~/.hermes/scripts/location-updater /usr/local/bin/location-updater
 
 # 4. Restart the supervised service as the user
 systemctl --user restart location-updater
@@ -61,7 +61,7 @@ python3 /usr/local/bin/location-compact
 
 ## The "missing data" diagnostic flow
 
-1. `location-query --today` empty? -> check raw JSONL: `python3 -c "import json;print(len([1 for l in open('/home/madvulcan/.hermes/location-history.jsonl') if l.strip()]))"`. If JSONL has today's points but DB doesn't -> compact cron was skipped (machine asleep at 3:15). Run compact manually.
+1. `location-query --today` empty? -> check raw JSONL: `python3 -c "import json;print(len([1 for l in open(os.path.expanduser('~/.hermes/location-history.jsonl')) if l.strip()]))"`. If JSONL has today's points but DB doesn't -> compact cron was skipped (machine asleep at 3:15). Run compact manually.
 2. DB newest row older than expected AND a whole day missing? -> 48h rolling-window cap + prune. Data is gone; not retroactively recoverable.
 3. Service dead but data still flowing? -> root orphan sole writer (see matrix above).
 4. No data at all and no process? -> restart service; check phone streaming (see android-companion-app.md deep-sleep diagnostic).
