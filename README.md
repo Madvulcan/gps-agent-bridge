@@ -45,11 +45,12 @@ The entire pipeline runs in the background. Once set up, your agent always knows
 
 | Platform | App | Protocol | Cost |
 |----------|-----|----------|------|
-| **Android** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free |
+| **Android** | [GPS AgentBridge](https://github.com/Madvulcan/GPS-AgentBridge-Android/releases) | UDP | Free |
+| **Android (alt)** | [gpsdRelay](https://f-droid.org/packages/io.github.project_kaat.gpsdrelay/) | UDP | Free |
 | **iOS (free)** | [NMEA Send Location](https://apps.apple.com/us/app/nmea-send-location/id6749798097) | UDP | Free |
 | **iOS (alt)** | [GPS2IP](https://apps.apple.com/us/app/gps-2-ip/id408625926) | TCP/UDP push | ~$5 |
 
-Both apps push standard NMEA 0183 sentences to your desktop — the setup is identical regardless of phone OS.
+All apps push standard NMEA 0183 sentences to your desktop — the setup is identical regardless of phone OS. GPS AgentBridge offers distance-based transmission, tracking levels, and significant-motion sensor support for better battery life.
 
 ## Prerequisites
 
